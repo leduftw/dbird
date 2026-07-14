@@ -1,20 +1,30 @@
+use std::collections::VecDeque;
 use std::error::Error;
 use std::io::{self, IsTerminal, Write};
 use std::process::ExitCode;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use dbird::audio::{Audio, Sound};
 use dbird::cli::{self, CliCommand, CliOptions};
-use dbird::game::{Game, Phase};
+use dbird::game::{DeathCause, Game, Phase};
 use dbird::signals::ShutdownSignals;
 use dbird::storage::HighScoreStore;
 use dbird::terminal::{TerminalSession, install_panic_hook};
 use dbird::ui::{self, UiOptions};
 use ratatui::layout::Rect;
 
-const PHYSICS_STEP: Duration = Duration::from_nanos(8_333_333);
+const PHYSICS_STEP: Duration = Duration::from_nanos(16_666_667);
 const FRAME_TIME: Duration = Duration::from_nanos(16_666_667);
 const MAX_FRAME_DELTA: Duration = Duration::from_millis(100);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum KeyAction {
+    None,
+    Quit,
+    Flap,
+    Start,
+}
 
 fn main() -> ExitCode {
     match run() {
@@ -47,6 +57,7 @@ fn run_game(options: CliOptions) -> Result<(), Box<dyn Error>> {
 
     let shutdown = ShutdownSignals::install()?;
     install_panic_hook();
+    let audio = Audio::new(!options.mute);
     let mut terminal = TerminalSession::enter()?;
     let initial_area: Rect = terminal.terminal_mut().size()?.into();
     let (field_width, field_height) = ui::field_size(initial_area);
@@ -65,6 +76,7 @@ fn run_game(options: CliOptions) -> Result<(), Box<dyn Error>> {
     let mut save_attempted = false;
     let mut save_warning = None;
     let mut should_quit = false;
+    let mut pending_sounds = VecDeque::new();
 
     while !should_quit {
         if shutdown.requested() {
@@ -72,6 +84,14 @@ fn run_game(options: CliOptions) -> Result<(), Box<dyn Error>> {
         }
 
         let frame_started = Instant::now();
+        while pending_sounds
+            .front()
+            .is_some_and(|(play_at, _)| *play_at <= frame_started)
+        {
+            if let Some((_, sound)) = pending_sounds.pop_front() {
+                audio.play(sound);
+            }
+        }
         let frame_delta = frame_started
             .saturating_duration_since(last_loop)
             .min(MAX_FRAME_DELTA);
@@ -79,6 +99,8 @@ fn run_game(options: CliOptions) -> Result<(), Box<dyn Error>> {
 
         let area: Rect = terminal.terminal_mut().size()?.into();
         let fits = ui::fits(area, &game);
+        let score_before_update = game.score;
+        let phase_before_update = game.phase;
         if !fits {
             was_too_small = true;
             accumulator = Duration::ZERO;
@@ -89,7 +111,7 @@ fn run_game(options: CliOptions) -> Result<(), Box<dyn Error>> {
                 accumulator = Duration::ZERO;
             }
 
-            if game.phase == Phase::Playing {
+            if matches!(game.phase, Phase::Playing | Phase::Dying) {
                 accumulator = accumulator.saturating_add(frame_delta);
                 while accumulator >= PHYSICS_STEP {
                     game.update(PHYSICS_STEP.as_secs_f64());
@@ -98,6 +120,19 @@ fn run_game(options: CliOptions) -> Result<(), Box<dyn Error>> {
             } else {
                 accumulator = Duration::ZERO;
             }
+        }
+
+        if game.score > score_before_update {
+            audio.play(Sound::Point);
+        }
+        if phase_before_update == Phase::Playing && game.phase == Phase::Dying {
+            audio.play(Sound::Hit);
+            if game.death_cause() == Some(DeathCause::Pipe) {
+                pending_sounds.push_back((frame_started + Duration::from_millis(500), Sound::Die));
+            }
+        }
+        if phase_before_update == Phase::Dying && game.phase == Phase::GameOver {
+            audio.play(Sound::Swoosh);
         }
 
         if game.score > high_score {
@@ -124,10 +159,19 @@ fn run_game(options: CliOptions) -> Result<(), Box<dyn Error>> {
             loop {
                 if let Event::Key(key) = event::read()?
                     && key.kind != KeyEventKind::Release
-                    && handle_key(key, area, fits, &mut game, &mut new_best)
                 {
-                    should_quit = true;
-                    break;
+                    match handle_key(key, area, fits, &mut game, &mut new_best) {
+                        KeyAction::Quit => {
+                            should_quit = true;
+                            break;
+                        }
+                        KeyAction::Flap => audio.play(Sound::Wing),
+                        KeyAction::Start => {
+                            pending_sounds.clear();
+                            audio.play(Sound::Wing);
+                        }
+                        KeyAction::None => {}
+                    }
                 }
 
                 if !event::poll(Duration::ZERO)? {
@@ -158,35 +202,44 @@ fn handle_key(
     terminal_fits: bool,
     game: &mut Game,
     new_best: &mut bool,
-) -> bool {
+) -> KeyAction {
     if key.code == KeyCode::Esc
         || matches!(key.code, KeyCode::Char('q' | 'Q'))
         || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
     {
-        return true;
+        return KeyAction::Quit;
     }
 
-    if key.kind == KeyEventKind::Press
-        && matches!(key.code, KeyCode::Char(character) if character.eq_ignore_ascii_case(&'r'))
-    {
-        if ui::can_start_round(terminal_area) {
-            let (width, height) = ui::field_size(terminal_area);
-            game.restart(width, height);
-            *new_best = false;
+    if key.code == KeyCode::Enter && key.kind == KeyEventKind::Press {
+        if matches!(game.phase, Phase::Ready | Phase::GameOver)
+            && ui::can_start_round(terminal_area)
+        {
+            if game.phase == Phase::GameOver || !terminal_fits {
+                let (width, height) = ui::field_size(terminal_area);
+                game.restart(width, height);
+                *new_best = false;
+            }
+            if game.start() {
+                return KeyAction::Start;
+            }
         }
-        return false;
+        return KeyAction::None;
     }
 
     if !terminal_fits {
-        return false;
+        return KeyAction::None;
     }
 
     match key.code {
-        KeyCode::Char(' ') | KeyCode::Enter | KeyCode::Up => {
-            flap_or_start(game, terminal_area, new_best);
+        KeyCode::Char(' ') | KeyCode::Up => {
+            if game.flap() {
+                return KeyAction::Flap;
+            }
         }
         KeyCode::Char(character) if matches!(character.to_ascii_lowercase(), 'w' | 'k') => {
-            flap_or_start(game, terminal_area, new_best);
+            if game.flap() {
+                return KeyAction::Flap;
+            }
         }
         KeyCode::Char(character)
             if key.kind == KeyEventKind::Press && character.eq_ignore_ascii_case(&'p') =>
@@ -196,23 +249,7 @@ fn handle_key(
         _ => {}
     }
 
-    false
-}
-
-fn flap_or_start(game: &mut Game, terminal_area: Rect, new_best: &mut bool) {
-    match game.phase {
-        Phase::Ready | Phase::Playing => game.flap(),
-        Phase::Paused => {
-            game.resume();
-            game.flap();
-        }
-        Phase::GameOver => {
-            let (width, height) = ui::field_size(terminal_area);
-            game.restart(width, height);
-            *new_best = false;
-            game.flap();
-        }
-    }
+    KeyAction::None
 }
 
 fn random_seed() -> u64 {
@@ -251,35 +288,49 @@ mod tests {
         let mut new_best = false;
         let area = Rect::new(0, 0, 20, 10);
 
-        assert!(handle_key(
-            key(KeyCode::Esc),
-            area,
-            false,
-            &mut game,
-            &mut new_best
-        ));
-        assert!(handle_key(
-            key(KeyCode::Char('q')),
-            area,
-            false,
-            &mut game,
-            &mut new_best
-        ));
+        assert_eq!(
+            handle_key(key(KeyCode::Esc), area, false, &mut game, &mut new_best),
+            KeyAction::Quit
+        );
+        assert_eq!(
+            handle_key(
+                key(KeyCode::Char('q')),
+                area,
+                false,
+                &mut game,
+                &mut new_best
+            ),
+            KeyAction::Quit
+        );
     }
 
     #[test]
-    fn flap_starts_and_pause_key_toggles() {
+    fn only_enter_starts_and_pause_key_toggles() {
         let mut game = Game::new(80, 20, 7);
         let mut new_best = false;
         let area = Rect::new(0, 0, 82, 26);
 
-        assert!(!handle_key(
+        handle_key(
             key(KeyCode::Char(' ')),
             area,
             true,
             &mut game,
-            &mut new_best
-        ));
+            &mut new_best,
+        );
+        handle_key(key(KeyCode::Up), area, true, &mut game, &mut new_best);
+        handle_key(
+            key(KeyCode::Char('r')),
+            area,
+            true,
+            &mut game,
+            &mut new_best,
+        );
+        assert_eq!(game.phase, Phase::Ready);
+
+        assert_eq!(
+            handle_key(key(KeyCode::Enter), area, true, &mut game, &mut new_best),
+            KeyAction::Start
+        );
         assert_eq!(game.phase, Phase::Playing);
 
         handle_key(
@@ -290,6 +341,24 @@ mod tests {
             &mut new_best,
         );
         assert_eq!(game.phase, Phase::Paused);
+
+        handle_key(
+            key(KeyCode::Char(' ')),
+            area,
+            true,
+            &mut game,
+            &mut new_best,
+        );
+        assert_eq!(game.phase, Phase::Paused);
+
+        handle_key(
+            key(KeyCode::Char('p')),
+            area,
+            true,
+            &mut game,
+            &mut new_best,
+        );
+        assert_eq!(game.phase, Phase::Playing);
     }
 
     #[test]
@@ -309,13 +378,13 @@ mod tests {
     }
 
     #[test]
-    fn restart_can_adopt_a_smaller_but_still_playable_terminal() {
+    fn enter_retry_can_adopt_a_smaller_but_still_playable_terminal() {
         let mut game = Game::new(100, 30, 7);
-        game.flap();
+        game.phase = Phase::GameOver;
         let mut new_best = true;
 
         handle_key(
-            key(KeyCode::Char('r')),
+            key(KeyCode::Enter),
             Rect::new(0, 0, 80, 24),
             false,
             &mut game,
@@ -323,34 +392,101 @@ mod tests {
         );
 
         assert_eq!((game.width, game.height), (78, 18));
-        assert_eq!(game.phase, Phase::Ready);
+        assert_eq!(game.phase, Phase::Playing);
         assert!(!new_best);
     }
 
     #[test]
-    fn repeated_non_flap_keys_do_not_toggle_or_restart() {
+    fn repeated_space_and_enter_cannot_restart_a_dead_round() {
         let mut game = Game::new(80, 20, 7);
-        game.flap();
+        game.phase = Phase::GameOver;
         let original_pipes = game.pipes.clone();
-        let mut new_best = false;
+        let mut new_best = true;
         let area = Rect::new(0, 0, 82, 26);
 
         handle_key(
-            repeated_key(KeyCode::Char('p')),
+            repeated_key(KeyCode::Char(' ')),
             area,
             true,
             &mut game,
             &mut new_best,
         );
         handle_key(
-            repeated_key(KeyCode::Char('r')),
+            repeated_key(KeyCode::Enter),
             area,
             true,
             &mut game,
             &mut new_best,
         );
 
-        assert_eq!(game.phase, Phase::Playing);
+        assert_eq!(game.phase, Phase::GameOver);
         assert_eq!(game.pipes, original_pipes);
+        assert!(new_best);
+    }
+
+    #[test]
+    fn enter_press_retries_and_r_never_restarts() {
+        let mut game = Game::new(80, 20, 7);
+        game.phase = Phase::GameOver;
+        game.score = 12;
+        let mut new_best = true;
+        let area = Rect::new(0, 0, 82, 26);
+
+        handle_key(
+            key(KeyCode::Char('r')),
+            area,
+            true,
+            &mut game,
+            &mut new_best,
+        );
+        assert_eq!(game.phase, Phase::GameOver);
+        assert_eq!(game.score, 12);
+
+        handle_key(key(KeyCode::Enter), area, true, &mut game, &mut new_best);
+        assert_eq!(game.phase, Phase::Playing);
+        assert_eq!(game.score, 0);
+        assert!(!new_best);
+    }
+
+    #[test]
+    fn offscreen_flaps_are_ignored_without_a_wing_action() {
+        let mut game = Game::new(80, 20, 7);
+        game.start();
+        game.bird_y = -1.0;
+        game.bird_velocity = 2.0;
+        let mut new_best = false;
+
+        assert_eq!(
+            handle_key(
+                key(KeyCode::Char(' ')),
+                Rect::new(0, 0, 82, 26),
+                true,
+                &mut game,
+                &mut new_best,
+            ),
+            KeyAction::None
+        );
+        assert_eq!(game.bird_velocity, 2.0);
+    }
+
+    #[test]
+    fn no_gameplay_key_can_skip_the_dying_animation() {
+        let mut game = Game::new(80, 20, 7);
+        game.phase = Phase::Dying;
+        let mut new_best = false;
+        let area = Rect::new(0, 0, 82, 26);
+
+        for code in [
+            KeyCode::Enter,
+            KeyCode::Char(' '),
+            KeyCode::Char('p'),
+            KeyCode::Char('r'),
+        ] {
+            assert_eq!(
+                handle_key(key(code), area, true, &mut game, &mut new_best),
+                KeyAction::None
+            );
+            assert_eq!(game.phase, Phase::Dying);
+        }
     }
 }

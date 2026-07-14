@@ -16,6 +16,7 @@ Usage: dbird [OPTIONS]
 Options:
       --ascii          Use ASCII-only graphics
       --no-color       Disable colored output
+      --mute           Disable sound effects
       --seed <u64>     Use a deterministic random seed
       --reset-score    Reset the saved high score before starting
   -h, --help           Print help
@@ -27,6 +28,7 @@ Options:
 pub struct CliOptions {
     pub ascii: bool,
     pub no_color: bool,
+    pub mute: bool,
     pub seed: Option<u64>,
     pub reset_score: bool,
 }
@@ -94,6 +96,7 @@ where
         match argument.as_str() {
             "--ascii" => options.ascii = true,
             "--no-color" => options.no_color = true,
+            "--mute" => options.mute = true,
             "--reset-score" => options.reset_score = true,
             "-h" | "--help" => return Ok(CliCommand::Help),
             "-V" | "--version" => return Ok(CliCommand::Version),
@@ -153,6 +156,7 @@ mod tests {
             CliOptions {
                 ascii: true,
                 no_color: true,
+                mute: false,
                 seed: Some(u64::MAX),
                 reset_score: true,
             }
@@ -183,8 +187,8 @@ mod tests {
             Err(CliError::UnknownArgument("--colour".into()))
         );
         assert_eq!(
-            parse_args(["level-one"]),
-            Err(CliError::UnknownArgument("level-one".into()))
+            parse_args(["fly-now"]),
+            Err(CliError::UnknownArgument("fly-now".into()))
         );
     }
 
@@ -214,10 +218,18 @@ mod tests {
     #[test]
     fn repeated_boolean_flags_are_idempotent() {
         assert_eq!(
-            run_options(&["--ascii", "--ascii", "--no-color", "--no-color"]),
+            run_options(&[
+                "--ascii",
+                "--ascii",
+                "--no-color",
+                "--no-color",
+                "--mute",
+                "--mute",
+            ]),
             CliOptions {
                 ascii: true,
                 no_color: true,
+                mute: true,
                 seed: None,
                 reset_score: false,
             }

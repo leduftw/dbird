@@ -15,18 +15,21 @@ cargo run --release
 
 | Key | Action |
 | --- | --- |
-| `Space`, `↑`, `W`, or `K` | Flap / start / resume |
+| `Enter` | Start / retry |
+| `Space`, `↑`, `W`, or `K` | Flap during flight |
 | `P` | Pause or resume |
-| `R` | Restart the round |
 | `Q`, `Esc`, or `Ctrl-C` | Quit |
 
-Pass through each pipe opening to score. The flight speed rises gradually as the score climbs. If the terminal becomes too small, the round is safely suspended; enlarge it and resume when ready.
+Pass through each pipe opening to score. Pipe speed, pipe spacing, opening size, and flight physics stay fixed for the entire run, just like the original game. Scores of 10, 20, 30, and 40 award Bronze, Silver, Gold, and Platinum medals respectively. If the terminal becomes too small, the round is safely suspended; enlarge it and resume when ready.
+
+The original Android sound effects accompany flaps, points, collisions, and result transitions. Their separate rights notice is in [`assets/sounds/NOTICE.md`](assets/sounds/NOTICE.md).
 
 ## Options
 
 ```text
 --ascii          use plain ASCII graphics
 --no-color       disable the color palette
+--mute           disable sound effects
 --seed <NUMBER>  use deterministic pipe placement
 --reset-score    clear the saved high score before starting
 -h, --help       show help

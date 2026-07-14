@@ -8,6 +8,7 @@ description = "A fully playable terminal recreation of the classic Flappy Bird g
 [dependencies]
 crossterm = "0.29.0"
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }
+rodio = { version = "0.22.2", default-features = false, features = ["playback", "vorbis"] }
 
 [target.'cfg(unix)'.dependencies]
 signal-hook = "0.3.18"

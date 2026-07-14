@@ -10,7 +10,8 @@ use ratatui::{
 };
 
 use crate::game::{
-    Game, MAX_FIELD_HEIGHT, MAX_FIELD_WIDTH, MIN_FIELD_HEIGHT, MIN_FIELD_WIDTH, PIPE_WIDTH, Phase,
+    BIRD_VISUAL_OFFSET, BIRD_VISUAL_SIZE, GROUND_Y, Game, MAX_FIELD_HEIGHT, MAX_FIELD_WIDTH,
+    MIN_FIELD_HEIGHT, MIN_FIELD_WIDTH, Medal, PIPE_WIDTH, Phase, VIRTUAL_HEIGHT, VIRTUAL_WIDTH,
 };
 
 const HORIZONTAL_CHROME: u16 = 2;
@@ -132,6 +133,11 @@ impl Palette {
     const LIME_SHADOW: Color = Color::Rgb(42, 139, 68);
     const YELLOW: Color = Color::Rgb(255, 218, 72);
     const ORANGE: Color = Color::Rgb(255, 146, 64);
+    const BRONZE: Color = Color::Rgb(205, 127, 50);
+    const SILVER: Color = Color::Rgb(210, 220, 230);
+    const PLATINUM: Color = Color::Rgb(118, 238, 220);
+    const GROUND: Color = Color::Rgb(232, 215, 142);
+    const GROUND_SHADOW: Color = Color::Rgb(153, 119, 65);
     const TEXT: Color = Color::Rgb(222, 237, 248);
     const DIM: Color = Color::Rgb(72, 95, 119);
     const DANGER: Color = Color::Rgb(255, 87, 111);
@@ -228,51 +234,19 @@ fn draw_header(
 
     let best = best.max(game.score);
     let separator = if options.ascii { " | " } else { " │ " };
-    let compact = game.width < 66;
-    let line = if compact {
-        Line::from(vec![
-            Span::styled("S ", palette.fg(Palette::CYAN)),
-            Span::styled(
-                format!("{:04}", game.score),
-                palette.fg(Palette::TEXT).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(separator, palette.fg(Palette::DIM)),
-            Span::styled("BEST ", palette.fg(Palette::MAGENTA)),
-            Span::styled(
-                format!("{best:04}"),
-                palette.fg(Palette::TEXT).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(separator, palette.fg(Palette::DIM)),
-            Span::styled(
-                format!("L{}  {:.1}x", game.level(), game.speed() / 12.0),
-                palette.fg(Palette::LIME),
-            ),
-        ])
-    } else {
-        Line::from(vec![
-            Span::styled("SCORE ", palette.fg(Palette::CYAN)),
-            Span::styled(
-                format!("{:04}", game.score),
-                palette.fg(Palette::TEXT).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(separator, palette.fg(Palette::DIM)),
-            Span::styled("BEST ", palette.fg(Palette::MAGENTA)),
-            Span::styled(
-                format!("{best:04}"),
-                palette.fg(Palette::TEXT).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(separator, palette.fg(Palette::DIM)),
-            Span::styled(
-                format!("LEVEL {:02}", game.level()),
-                palette.fg(Palette::CYAN),
-            ),
-            Span::styled(separator, palette.fg(Palette::DIM)),
-            Span::styled(
-                format!("SPEED {:.1}x", game.speed() / 12.0),
-                palette.fg(Palette::LIME),
-            ),
-        ])
-    };
+    let line = Line::from(vec![
+        Span::styled("SCORE ", palette.fg(Palette::CYAN)),
+        Span::styled(
+            format!("{:04}", game.score),
+            palette.fg(Palette::TEXT).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(separator, palette.fg(Palette::DIM)),
+        Span::styled("BEST ", palette.fg(Palette::MAGENTA)),
+        Span::styled(
+            format!("{best:04}"),
+            palette.fg(Palette::TEXT).add_modifier(Modifier::BOLD),
+        ),
+    ]);
 
     frame.render_widget(
         Paragraph::new(line)
@@ -295,12 +269,13 @@ fn draw_field(
         Phase::Ready => " READY ",
         Phase::Playing => " FLYING ",
         Phase::Paused => " PAUSED ",
+        Phase::Dying => " CRASHED ",
         Phase::GameOver => " GAME OVER ",
     };
     let phase_color = match game.phase {
         Phase::Ready | Phase::Playing => Palette::LIME,
         Phase::Paused => Palette::MAGENTA,
-        Phase::GameOver => Palette::DANGER,
+        Phase::Dying | Phase::GameOver => Palette::DANGER,
     };
     let field_block = double_block(options)
         .title(Line::styled(
@@ -321,6 +296,7 @@ fn draw_field(
     draw_sky(frame, inner, game.elapsed, palette);
     draw_pipes(frame, inner, game, options, palette);
     draw_bird(frame, inner, game, options, palette);
+    draw_ground(frame, inner, options, palette);
 
     match game.phase {
         Phase::Ready => draw_overlay(
@@ -353,7 +329,7 @@ fn draw_field(
             options,
             palette,
         ),
-        Phase::Playing => {}
+        Phase::Playing | Phase::Dying => {}
     }
 }
 
@@ -403,23 +379,30 @@ fn draw_pipes(
     };
     let buffer = frame.buffer_mut();
 
+    let ground_top = project_floor(f64::from(GROUND_Y), VIRTUAL_HEIGHT, game.height)
+        .clamp(0, i32::from(game.height));
+
     for pipe in &game.pipes {
-        let pipe_x = pipe.x.round() as i32;
-        let gap_bottom = pipe.gap_top.saturating_add(pipe.gap_height);
+        let pipe_left = project_floor(pipe.x, VIRTUAL_WIDTH, game.width);
+        let pipe_right = project_ceil(pipe.x + f64::from(PIPE_WIDTH), VIRTUAL_WIDTH, game.width);
+        let gap_top = project_floor(f64::from(pipe.gap_top), VIRTUAL_HEIGHT, game.height);
+        let gap_bottom = project_ceil(
+            f64::from(pipe.gap_top + pipe.gap_height),
+            VIRTUAL_HEIGHT,
+            game.height,
+        );
+        // Preserve one visible lower-pipe cap when the virtual pipe starts in
+        // the same coarse terminal row as the ground.
+        let lower_pipe_top = visible_lower_pipe_top(gap_bottom, ground_top);
 
-        for offset in 0..PIPE_WIDTH {
-            let logical_x = pipe_x.saturating_add(i32::from(offset));
-            if logical_x < 0 || logical_x >= i32::from(game.width) {
-                continue;
-            }
-
-            for logical_y in 0..game.height {
-                if logical_y >= pipe.gap_top && logical_y < gap_bottom {
+        for logical_x in pipe_left.max(0)..pipe_right.min(i32::from(game.width)) {
+            for logical_y in 0..ground_top {
+                if logical_y >= gap_top && logical_y < lower_pipe_top {
                     continue;
                 }
 
-                let at_cap = logical_y.saturating_add(1) == pipe.gap_top || logical_y == gap_bottom;
-                let at_shadow = offset.saturating_add(1) == PIPE_WIDTH;
+                let at_cap = logical_y + 1 == gap_top || logical_y == lower_pipe_top;
+                let at_shadow = logical_x + 1 == pipe_right;
                 let symbol = if at_cap {
                     cap
                 } else if at_shadow {
@@ -433,7 +416,7 @@ fn draw_pipes(
                     palette.fg(Palette::LIME).add_modifier(Modifier::BOLD)
                 };
                 let x = area.x.saturating_add(logical_x as u16);
-                let y = area.y.saturating_add(logical_y);
+                let y = area.y.saturating_add(logical_y as u16);
 
                 if let Some(cell) = buffer.cell_mut((x, y)) {
                     cell.set_symbol(symbol).set_style(style);
@@ -444,41 +427,112 @@ fn draw_pipes(
 }
 
 fn draw_bird(frame: &mut Frame<'_>, area: Rect, game: &Game, options: UiOptions, palette: Palette) {
-    let bird_x = (game.bird_x.round() as i32).clamp(0, i32::from(game.width.saturating_sub(1)));
-    let bird_y = (game.bird_y.round() as i32).clamp(0, i32::from(game.height.saturating_sub(1)));
-    let wing = if game.bird_velocity < -1.0 {
-        if options.ascii { "/" } else { "▜" }
-    } else if game.bird_velocity > 1.0 {
-        if options.ascii { "\\" } else { "▟" }
-    } else if options.ascii {
-        "-"
-    } else {
-        "▐"
-    };
-    let cells = [
-        (wing, palette.fg(Palette::YELLOW)),
-        (
-            "O",
-            palette.fg(Palette::YELLOW).add_modifier(Modifier::BOLD),
-        ),
-        (
-            ">",
-            palette.fg(Palette::ORANGE).add_modifier(Modifier::BOLD),
-        ),
+    const UNICODE_BIRD: [[char; 16]; 2] = [
+        [
+            ' ', ' ', ' ', ' ', '╭', '─', '─', '─', '─', '●', '╮', ' ', '▶', '▶', ' ', ' ',
+        ],
+        [
+            '╭', '━', '━', '━', '╯', ' ', ' ', ' ', ' ', '╰', '─', '─', '▶', '▶', ' ', ' ',
+        ],
     ];
+    const ASCII_BIRD: [[char; 16]; 2] = [
+        [
+            ' ', ' ', ' ', ' ', '.', '-', '-', '-', '-', 'o', '.', ' ', '>', '>', ' ', ' ',
+        ],
+        [
+            '<', '=', '=', '=', '/', ' ', ' ', ' ', ' ', '\\', '-', '-', '>', '>', ' ', ' ',
+        ],
+    ];
+
+    let visual_left = game.bird_x - f64::from(BIRD_VISUAL_OFFSET);
+    let visual_top = game.bird_y - f64::from(BIRD_VISUAL_OFFSET);
+    let left = project_floor(visual_left, VIRTUAL_WIDTH, game.width);
+    let right = project_ceil(
+        visual_left + f64::from(BIRD_VISUAL_SIZE),
+        VIRTUAL_WIDTH,
+        game.width,
+    );
+    let top = project_floor(visual_top, VIRTUAL_HEIGHT, game.height);
+    let bottom = project_ceil(
+        visual_top + f64::from(BIRD_VISUAL_SIZE),
+        VIRTUAL_HEIGHT,
+        game.height,
+    );
+    let sprite_width = (right - left).max(1);
+    let sprite_height = (bottom - top).max(1);
+    let artwork = if options.ascii {
+        &ASCII_BIRD
+    } else {
+        &UNICODE_BIRD
+    };
     let buffer = frame.buffer_mut();
 
-    for (offset, (symbol, style)) in cells.into_iter().enumerate() {
-        let logical_x = bird_x.saturating_add(offset as i32);
-        if logical_x < 0 || logical_x >= i32::from(game.width) {
-            continue;
-        }
-        let x = area.x.saturating_add(logical_x as u16);
-        let y = area.y.saturating_add(bird_y as u16);
-        if let Some(cell) = buffer.cell_mut((x, y)) {
-            cell.set_symbol(symbol).set_style(style);
+    for logical_y in top.max(0)..bottom.min(i32::from(game.height)) {
+        let template_y = ((logical_y - top) * artwork.len() as i32 / sprite_height) as usize;
+        for logical_x in left.max(0)..right.min(i32::from(game.width)) {
+            let template_x = ((logical_x - left) * artwork[0].len() as i32 / sprite_width) as usize;
+            let symbol =
+                artwork[template_y.min(artwork.len() - 1)][template_x.min(artwork[0].len() - 1)];
+            if symbol == ' ' {
+                continue;
+            }
+
+            let color = if matches!(symbol, '>' | '▶') {
+                Palette::ORANGE
+            } else if matches!(symbol, 'o' | '●') {
+                Palette::TEXT
+            } else {
+                Palette::YELLOW
+            };
+            let x = area.x.saturating_add(logical_x as u16);
+            let y = area.y.saturating_add(logical_y as u16);
+            if let Some(cell) = buffer.cell_mut((x, y)) {
+                cell.set_char(symbol)
+                    .set_style(palette.fg(color).add_modifier(Modifier::BOLD));
+            }
         }
     }
+}
+
+fn draw_ground(frame: &mut Frame<'_>, area: Rect, options: UiOptions, palette: Palette) {
+    let ground_top = project_floor(f64::from(GROUND_Y), VIRTUAL_HEIGHT, area.height)
+        .clamp(0, i32::from(area.height)) as u16;
+    let buffer = frame.buffer_mut();
+
+    for logical_y in ground_top..area.height {
+        for logical_x in 0..area.width {
+            let top_edge = logical_y == ground_top;
+            let symbol = if top_edge {
+                if options.ascii { "=" } else { "▀" }
+            } else if (logical_x + logical_y) % 3 == 0 {
+                if options.ascii { "." } else { "░" }
+            } else {
+                " "
+            };
+            let style = if top_edge {
+                palette.on(Palette::LIME, Palette::GROUND)
+            } else {
+                palette.on(Palette::GROUND_SHADOW, Palette::GROUND)
+            };
+            let x = area.x.saturating_add(logical_x);
+            let y = area.y.saturating_add(logical_y);
+            if let Some(cell) = buffer.cell_mut((x, y)) {
+                cell.set_symbol(symbol).set_style(style);
+            }
+        }
+    }
+}
+
+fn project_floor(value: f64, virtual_extent: u16, terminal_extent: u16) -> i32 {
+    (value * f64::from(terminal_extent) / f64::from(virtual_extent)).floor() as i32
+}
+
+fn project_ceil(value: f64, virtual_extent: u16, terminal_extent: u16) -> i32 {
+    (value * f64::from(terminal_extent) / f64::from(virtual_extent)).ceil() as i32
+}
+
+fn visible_lower_pipe_top(projected_pipe_top: i32, projected_ground_top: i32) -> i32 {
+    projected_pipe_top.min((projected_ground_top - 1).max(0))
 }
 
 #[derive(Clone, Copy)]
@@ -500,12 +554,24 @@ fn draw_overlay(
     palette: Palette,
 ) {
     let height = match overlay {
-        Overlay::GameOver => 9,
-        Overlay::Ready | Overlay::Paused => 7,
+        Overlay::GameOver => 10,
+        Overlay::Paused => 7,
+        Overlay::Ready => 5,
     }
     .min(field.height);
     let width = 42.min(field.width);
-    let area = centered(field, width, height);
+    let area = if matches!(overlay, Overlay::Ready) {
+        Rect::new(
+            field
+                .x
+                .saturating_add(field.width.saturating_sub(width) / 2),
+            field.y,
+            width,
+            height,
+        )
+    } else {
+        centered(field, width, height)
+    };
 
     let (title, title_color) = match overlay {
         Overlay::Ready => (" READY? ", Palette::LIME),
@@ -524,13 +590,10 @@ fn draw_overlay(
         Overlay::Ready => vec![
             Line::from(""),
             Line::styled(
-                "PRESS SPACE TO FLAP",
+                "PRESS ENTER TO START",
                 palette.fg(Palette::YELLOW).add_modifier(Modifier::BOLD),
             ),
-            Line::styled(
-                "Thread every gap. Stay airborne.",
-                palette.fg(Palette::TEXT),
-            ),
+            Line::styled("Space flaps during flight.", palette.fg(Palette::TEXT)),
         ],
         Overlay::Paused => vec![
             Line::from(""),
@@ -538,7 +601,7 @@ fn draw_overlay(
                 "FLIGHT SUSPENDED",
                 palette.fg(Palette::MAGENTA).add_modifier(Modifier::BOLD),
             ),
-            Line::styled("P or Space to resume", palette.fg(Palette::TEXT)),
+            Line::styled("Press P to resume", palette.fg(Palette::TEXT)),
         ],
         Overlay::GameOver => {
             let best = best.max(game.score);
@@ -549,6 +612,13 @@ fn draw_overlay(
                 )
             } else {
                 Line::styled("FINAL SCORE", palette.fg(Palette::DIM))
+            };
+            let medal = match game.medal() {
+                Some(medal) => Line::styled(
+                    format!("{} MEDAL", medal.label()),
+                    palette.fg(medal_color(medal)).add_modifier(Modifier::BOLD),
+                ),
+                None => Line::styled("NO MEDAL", palette.fg(Palette::DIM)),
             };
             vec![
                 Line::from(""),
@@ -564,8 +634,12 @@ fn draw_overlay(
                         palette.fg(Palette::MAGENTA).add_modifier(Modifier::BOLD),
                     ),
                 ]),
+                medal,
                 Line::from(""),
-                Line::styled("Space to fly again  |  R reset", palette.fg(Palette::TEXT)),
+                Line::styled(
+                    "PRESS ENTER TO RETRY",
+                    palette.fg(Palette::YELLOW).add_modifier(Modifier::BOLD),
+                ),
             ]
         }
     };
@@ -580,6 +654,15 @@ fn draw_overlay(
     );
 }
 
+const fn medal_color(medal: Medal) -> Color {
+    match medal {
+        Medal::Bronze => Palette::BRONZE,
+        Medal::Silver => Palette::SILVER,
+        Medal::Gold => Palette::YELLOW,
+        Medal::Platinum => Palette::PLATINUM,
+    }
+}
+
 fn draw_footer(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -590,8 +673,8 @@ fn draw_footer(
     let separator = if options.ascii { "  |  " } else { "  │  " };
     let mut spans = match phase {
         Phase::Ready => vec![
-            key_span("SPACE", Palette::CYAN, palette),
-            Span::styled(" take off", palette.fg(Palette::DIM)),
+            key_span("ENTER", Palette::CYAN, palette),
+            Span::styled(" start", palette.fg(Palette::DIM)),
         ],
         Phase::Playing => vec![
             key_span("SPACE", Palette::CYAN, palette),
@@ -601,21 +684,16 @@ fn draw_footer(
             Span::styled(" pause", palette.fg(Palette::DIM)),
         ],
         Phase::Paused => vec![
-            key_span("SPACE", Palette::CYAN, palette),
-            Span::styled(" resume/flap", palette.fg(Palette::DIM)),
-            Span::styled(separator, palette.fg(Palette::DIM)),
             key_span("P", Palette::MAGENTA, palette),
             Span::styled(" resume", palette.fg(Palette::DIM)),
         ],
+        Phase::Dying => vec![Span::styled("...", palette.fg(Palette::DANGER))],
         Phase::GameOver => vec![
-            key_span("SPACE", Palette::CYAN, palette),
+            key_span("ENTER", Palette::CYAN, palette),
             Span::styled(" retry", palette.fg(Palette::DIM)),
         ],
     };
     spans.extend([
-        Span::styled(separator, palette.fg(Palette::DIM)),
-        key_span("R", Palette::LIME, palette),
-        Span::styled(" restart", palette.fg(Palette::DIM)),
         Span::styled(separator, palette.fg(Palette::DIM)),
         key_span("Q", Palette::DANGER, palette),
         Span::styled(" quit", palette.fg(Palette::DIM)),
@@ -675,8 +753,8 @@ fn draw_too_small(
         ),
         Line::from(""),
         Line::styled(
-            if can_start_round(area) {
-                "R fit a new round  |  Q quit"
+            if can_start_round(area) && matches!(game.phase, Phase::Ready | Phase::GameOver) {
+                "ENTER fit and start  |  Q quit"
             } else {
                 "Resize to continue  |  Q quit"
             },
@@ -759,6 +837,28 @@ mod tests {
     }
 
     #[test]
+    fn ready_card_keeps_the_enlarged_bird_visible() {
+        let game = Game::new(MIN_FIELD_WIDTH, MIN_FIELD_HEIGHT, 7);
+        let (width, height) = required_size(&game);
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+
+        terminal
+            .draw(|frame| draw(frame, &game, 0, false, UiOptions::default()))
+            .expect("draw frame");
+
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(rendered.contains("PRESS ENTER TO START"));
+        assert!(rendered.contains('●'), "the ready card hid the bird's eye");
+    }
+
+    #[test]
     fn a_small_terminal_reports_current_and_required_dimensions() {
         let game = Game::new(MIN_FIELD_WIDTH, MIN_FIELD_HEIGHT, 7);
         let backend = TestBackend::new(40, 10);
@@ -781,7 +881,7 @@ mod tests {
     }
 
     #[test]
-    fn a_smaller_but_playable_terminal_offers_to_fit_a_new_round() {
+    fn a_smaller_but_playable_terminal_offers_enter_to_fit_a_new_round() {
         let game = Game::new(MAX_FIELD_WIDTH, MAX_FIELD_HEIGHT, 7);
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).expect("test terminal");
@@ -797,6 +897,78 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect();
-        assert!(rendered.contains("R fit a new round"));
+        assert!(rendered.contains("ENTER fit and start"));
+    }
+
+    #[test]
+    fn standard_terminal_projects_original_visual_proportions() {
+        let width = 78;
+        let height = 18;
+        let bird_left = project_floor(
+            f64::from(crate::game::BIRD_START_X - BIRD_VISUAL_OFFSET),
+            VIRTUAL_WIDTH,
+            width,
+        );
+        let bird_right = project_ceil(
+            f64::from(crate::game::BIRD_START_X - BIRD_VISUAL_OFFSET + BIRD_VISUAL_SIZE),
+            VIRTUAL_WIDTH,
+            width,
+        );
+
+        assert_eq!(bird_right - bird_left, 14);
+        assert_eq!(
+            project_floor(f64::from(GROUND_Y), VIRTUAL_HEIGHT, height),
+            14
+        );
+        assert_eq!(
+            project_ceil(f64::from(PIPE_WIDTH), VIRTUAL_WIDTH, width),
+            15
+        );
+        assert_eq!(
+            project_ceil(180.0, VIRTUAL_HEIGHT, height)
+                - project_floor(84.0, VIRTUAL_HEIGHT, height),
+            5
+        );
+        assert_eq!(visible_lower_pipe_top(10, 10), 9);
+        assert_eq!(visible_lower_pipe_top(7, 14), 7);
+    }
+
+    #[test]
+    fn result_card_shows_original_medal_and_enter_only_retry() {
+        let mut game = Game::new(MIN_FIELD_WIDTH, MIN_FIELD_HEIGHT, 7);
+        game.phase = Phase::GameOver;
+        game.score = 30;
+        let (width, height) = required_size(&game);
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+
+        terminal
+            .draw(|frame| {
+                draw(
+                    frame,
+                    &game,
+                    30,
+                    false,
+                    UiOptions {
+                        ascii: true,
+                        color: false,
+                    },
+                );
+            })
+            .expect("draw frame");
+
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(rendered.contains("GOLD MEDAL"));
+        assert!(rendered.contains("PRESS ENTER TO RETRY"));
+        assert!(!rendered.contains("Space to fly again"));
+        assert!(!rendered.contains("R reset"));
+        assert!(!rendered.contains("LEVEL"));
+        assert!(!rendered.contains("SPEED"));
     }
 }
