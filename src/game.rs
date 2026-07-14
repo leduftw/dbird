@@ -5,13 +5,13 @@
 //! them never changes the course, physics, or collision geometry.
 
 /// Smallest supported terminal play-field width, in cells.
-pub const MIN_FIELD_WIDTH: u16 = 54;
+pub const MIN_FIELD_WIDTH: u16 = 16;
 /// Smallest supported terminal play-field height, in cells.
 pub const MIN_FIELD_HEIGHT: u16 = 14;
 /// Largest supported terminal play-field width, in cells.
-pub const MAX_FIELD_WIDTH: u16 = 100;
+pub const MAX_FIELD_WIDTH: u16 = 45;
 /// Largest supported terminal play-field height, in cells.
-pub const MAX_FIELD_HEIGHT: u16 = 30;
+pub const MAX_FIELD_HEIGHT: u16 = 40;
 
 /// Width of the original virtual canvas, in pixels.
 pub const VIRTUAL_WIDTH: u16 = 288;
@@ -28,10 +28,14 @@ pub const BIRD_START_Y: u16 = 246;
 pub const BIRD_WIDTH: u16 = 20;
 /// Height of the bird's collision box.
 pub const BIRD_HEIGHT: u16 = 20;
-/// Width and height of the square visual cell containing the bird art.
-pub const BIRD_VISUAL_SIZE: u16 = 48;
-/// Inset from the visual cell to the bird's 20x20 collision box.
-pub const BIRD_VISUAL_OFFSET: u16 = 14;
+/// Width of the non-transparent bird artwork inside its 48x48 atlas frame.
+pub const BIRD_ART_WIDTH: u16 = 34;
+/// Height of the non-transparent bird artwork inside its 48x48 atlas frame.
+pub const BIRD_ART_HEIGHT: u16 = 24;
+/// Distance from the artwork's left edge to the hitbox's left edge.
+pub const BIRD_ART_OFFSET_X: u16 = 8;
+/// Distance from the artwork's top edge to the hitbox's top edge.
+pub const BIRD_ART_OFFSET_Y: u16 = 2;
 
 /// Width of each pipe on the virtual canvas.
 pub const PIPE_WIDTH: u16 = 52;
@@ -509,7 +513,12 @@ mod tests {
         assert_eq!(game.elapsed, 0.0);
         assert!(game.pipes.is_empty());
         assert_eq!(game.death_cause(), None);
-        assert_eq!(BIRD_VISUAL_SIZE - BIRD_WIDTH, BIRD_VISUAL_OFFSET * 2);
+        assert_eq!(BIRD_ART_WIDTH, 34);
+        assert_eq!(BIRD_ART_HEIGHT, 24);
+        assert_eq!(BIRD_ART_OFFSET_X, 8);
+        assert_eq!(BIRD_ART_OFFSET_Y, 2);
+        assert_eq!(BIRD_ART_WIDTH - BIRD_WIDTH - BIRD_ART_OFFSET_X, 6);
+        assert_eq!(BIRD_ART_HEIGHT - BIRD_HEIGHT - BIRD_ART_OFFSET_Y, 2);
     }
 
     #[test]
@@ -555,6 +564,20 @@ mod tests {
         game.bird_velocity = 7.9;
         game.update(TICK);
         assert_eq!(game.bird_velocity, MAX_FALL_VELOCITY);
+    }
+
+    #[test]
+    fn one_flap_rises_the_source_locked_forty_seven_pixels() {
+        let mut game = playing_game();
+        let mut apex = game.bird_y;
+
+        for _ in 0..30 {
+            game.update(TICK);
+            apex = apex.min(game.bird_y);
+        }
+
+        assert_eq!(apex, 199.0);
+        assert_eq!(f64::from(BIRD_START_Y) - apex, 47.0);
     }
 
     #[test]

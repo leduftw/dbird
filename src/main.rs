@@ -57,7 +57,7 @@ fn run_game(options: CliOptions) -> Result<(), Box<dyn Error>> {
 
     let shutdown = ShutdownSignals::install()?;
     install_panic_hook();
-    let audio = Audio::new(!options.mute);
+    let mut audio = Audio::new(!options.mute);
     let mut terminal = TerminalSession::enter()?;
     let initial_area: Rect = terminal.terminal_mut().size()?.into();
     let (field_width, field_height) = ui::field_size(initial_area);
@@ -391,7 +391,7 @@ mod tests {
             &mut new_best,
         );
 
-        assert_eq!((game.width, game.height), (78, 18));
+        assert_eq!((game.width, game.height), (20, 18));
         assert_eq!(game.phase, Phase::Playing);
         assert!(!new_best);
     }

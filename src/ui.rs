@@ -10,12 +10,20 @@ use ratatui::{
 };
 
 use crate::game::{
-    BIRD_VISUAL_OFFSET, BIRD_VISUAL_SIZE, GROUND_Y, Game, MAX_FIELD_HEIGHT, MAX_FIELD_WIDTH,
-    MIN_FIELD_HEIGHT, MIN_FIELD_WIDTH, Medal, PIPE_WIDTH, Phase, VIRTUAL_HEIGHT, VIRTUAL_WIDTH,
+    BIRD_ART_HEIGHT, BIRD_ART_OFFSET_X, BIRD_ART_OFFSET_Y, BIRD_ART_WIDTH, GROUND_Y, Game,
+    MAX_FIELD_HEIGHT, MAX_FIELD_WIDTH, MIN_FIELD_HEIGHT, MIN_FIELD_WIDTH, Medal, PIPE_WIDTH, Phase,
+    VIRTUAL_HEIGHT, VIRTUAL_WIDTH,
 };
 
 const HORIZONTAL_CHROME: u16 = 2;
 const VERTICAL_CHROME: u16 = 6;
+const HUD_MIN_WIDTH: u16 = 36;
+
+// A typical terminal cell is about twice as tall as it is wide. Coupling the
+// viewport to 9 columns for every 8 rows preserves the 288:512 game canvas in
+// physical pixels instead of stretching it across a landscape terminal.
+const PORTRAIT_COLUMNS: u32 = 9;
+const PORTRAIT_ROWS: u32 = 8;
 
 const ASCII_BORDER: border::Set<'static> = border::Set {
     top_left: "+",
@@ -53,29 +61,50 @@ impl Default for UiOptions {
 /// [`fits`] can then be used to show the resize prompt instead of creating a
 /// subtly different game.
 pub fn field_size(area: Rect) -> (u16, u16) {
+    let available_width = area
+        .width
+        .saturating_sub(HORIZONTAL_CHROME)
+        .min(MAX_FIELD_WIDTH);
+    let mut height = area
+        .height
+        .saturating_sub(VERTICAL_CHROME)
+        .clamp(MIN_FIELD_HEIGHT, MAX_FIELD_HEIGHT);
+
+    while height > MIN_FIELD_HEIGHT && portrait_width(height) > available_width {
+        height -= 1;
+    }
+
     (
-        area.width
-            .saturating_sub(HORIZONTAL_CHROME)
-            .clamp(MIN_FIELD_WIDTH, MAX_FIELD_WIDTH),
-        area.height
-            .saturating_sub(VERTICAL_CHROME)
-            .clamp(MIN_FIELD_HEIGHT, MAX_FIELD_HEIGHT),
+        portrait_width(height).clamp(MIN_FIELD_WIDTH, MAX_FIELD_WIDTH),
+        height,
     )
 }
 
 /// Whether `area` is large enough to host a newly-sized round.
 pub fn can_start_round(area: Rect) -> bool {
     let (width, height) = field_size(area);
-    area.width >= width.saturating_add(HORIZONTAL_CHROME)
-        && area.height >= height.saturating_add(VERTICAL_CHROME)
+    area.width >= stage_width(width) && area.height >= height.saturating_add(VERTICAL_CHROME)
 }
 
 /// Return the terminal dimensions required to display `game` without clipping.
 pub fn required_size(game: &Game) -> (u16, u16) {
     (
-        game.width.saturating_add(HORIZONTAL_CHROME),
+        stage_width(game.width),
         game.height.saturating_add(VERTICAL_CHROME),
     )
+}
+
+const fn portrait_width(height: u16) -> u16 {
+    ((height as u32 * PORTRAIT_COLUMNS + PORTRAIT_ROWS / 2) / PORTRAIT_ROWS) as u16
+}
+
+const fn stage_width(field_width: u16) -> u16 {
+    let field_with_border = field_width.saturating_add(HORIZONTAL_CHROME);
+    if field_with_border > HUD_MIN_WIDTH {
+        field_with_border
+    } else {
+        HUD_MIN_WIDTH
+    }
 }
 
 /// Whether `area` can display the complete HUD, field, and controls.
@@ -99,10 +128,13 @@ pub fn draw(frame: &mut Frame<'_>, game: &Game, best: u32, new_best: bool, optio
     let (required_width, required_height) = required_size(game);
     let stage = centered(area, required_width, required_height);
     let header = Rect::new(stage.x, stage.y, stage.width, 3);
+    let field_width = game.width.saturating_add(HORIZONTAL_CHROME);
     let field = Rect::new(
-        stage.x,
+        stage
+            .x
+            .saturating_add(stage.width.saturating_sub(field_width) / 2),
         stage.y.saturating_add(3),
-        stage.width,
+        field_width,
         game.height.saturating_add(2),
     );
     let footer = Rect::new(
@@ -394,6 +426,11 @@ fn draw_pipes(
         // Preserve one visible lower-pipe cap when the virtual pipe starts in
         // the same coarse terminal row as the ground.
         let lower_pipe_top = visible_lower_pipe_top(gap_bottom, ground_top);
+        // The original cap is wider than its shaft. Half-cell edge glyphs keep
+        // the full collision span visible without turning the shaft into a box.
+        let shaft_inset = i32::from(pipe_right - pipe_left >= 5);
+        let shaft_left = pipe_left + shaft_inset;
+        let shaft_right = pipe_right - shaft_inset;
 
         for logical_x in pipe_left.max(0)..pipe_right.min(i32::from(game.width)) {
             for logical_y in 0..ground_top {
@@ -402,15 +439,25 @@ fn draw_pipes(
                 }
 
                 let at_cap = logical_y + 1 == gap_top || logical_y == lower_pipe_top;
-                let at_shadow = logical_x + 1 == pipe_right;
+                let at_shaft_edge = !at_cap && (logical_x < shaft_left || logical_x >= shaft_right);
+                let active_right = if at_cap { pipe_right } else { shaft_right };
+                let at_shadow = logical_x + 1 == active_right;
                 let symbol = if at_cap {
                     cap
+                } else if at_shaft_edge {
+                    if options.ascii {
+                        "|"
+                    } else if logical_x < shaft_left {
+                        "▐"
+                    } else {
+                        "▌"
+                    }
                 } else if at_shadow {
                     shadow
                 } else {
                     body
                 };
-                let style = if at_shadow && !at_cap {
+                let style = if at_shaft_edge || (at_shadow && !at_cap) {
                     palette.fg(Palette::LIME_SHADOW)
                 } else {
                     palette.fg(Palette::LIME).add_modifier(Modifier::BOLD)
@@ -427,46 +474,59 @@ fn draw_pipes(
 }
 
 fn draw_bird(frame: &mut Frame<'_>, area: Rect, game: &Game, options: UiOptions, palette: Palette) {
-    const UNICODE_BIRD: [[char; 16]; 2] = [
-        [
-            ' ', ' ', ' ', ' ', '╭', '─', '─', '─', '─', '●', '╮', ' ', '▶', '▶', ' ', ' ',
-        ],
-        [
-            '╭', '━', '━', '━', '╯', ' ', ' ', ' ', ' ', '╰', '─', '─', '▶', '▶', ' ', ' ',
-        ],
+    const UNICODE_BIRD: [[char; 6]; 2] = [
+        [' ', '╭', '─', '●', '▶', '▶'],
+        ['╰', '━', '╯', '─', '▶', ' '],
     ];
-    const ASCII_BIRD: [[char; 16]; 2] = [
-        [
-            ' ', ' ', ' ', ' ', '.', '-', '-', '-', '-', 'o', '.', ' ', '>', '>', ' ', ' ',
-        ],
-        [
-            '<', '=', '=', '=', '/', ' ', ' ', ' ', ' ', '\\', '-', '-', '>', '>', ' ', ' ',
-        ],
+    const ASCII_BIRD: [[char; 6]; 2] = [
+        [' ', '.', '-', 'o', '>', '>'],
+        ['<', '=', '/', '-', '>', ' '],
     ];
 
-    let visual_left = game.bird_x - f64::from(BIRD_VISUAL_OFFSET);
-    let visual_top = game.bird_y - f64::from(BIRD_VISUAL_OFFSET);
-    let left = project_floor(visual_left, VIRTUAL_WIDTH, game.width);
-    let right = project_ceil(
-        visual_left + f64::from(BIRD_VISUAL_SIZE),
-        VIRTUAL_WIDTH,
-        game.width,
-    );
-    let top = project_floor(visual_top, VIRTUAL_HEIGHT, game.height);
-    let bottom = project_ceil(
-        visual_top + f64::from(BIRD_VISUAL_SIZE),
-        VIRTUAL_HEIGHT,
-        game.height,
-    );
-    let sprite_width = (right - left).max(1);
-    let sprite_height = (bottom - top).max(1);
+    // The source atlas stores each bird in a transparent 48x48 frame. Only a
+    // 34x24 rectangle is opaque, so rendering the whole frame makes the bird
+    // almost as wide as a pipe. These bounds reproduce the actual artwork.
+    let visual_left = game.bird_x - f64::from(BIRD_ART_OFFSET_X);
+    let visual_top = game.bird_y - f64::from(BIRD_ART_OFFSET_Y);
+    let left = project_round(visual_left, VIRTUAL_WIDTH, game.width);
+    let top = project_round(visual_top, VIRTUAL_HEIGHT, game.height);
+    let sprite_width = project_extent(BIRD_ART_WIDTH, VIRTUAL_WIDTH, game.width);
+    let sprite_height = project_extent(BIRD_ART_HEIGHT, VIRTUAL_HEIGHT, game.height);
+    let right = left + sprite_width;
+    let bottom = top + sprite_height;
+    let buffer = frame.buffer_mut();
+
+    if sprite_height == 1 {
+        let compact = if options.ascii {
+            [('o', Palette::TEXT), ('>', Palette::ORANGE)]
+        } else {
+            [('●', Palette::TEXT), ('▶', Palette::ORANGE)]
+        };
+        let compact_width = sprite_width.min(compact.len() as i32);
+        let compact_left = left + (sprite_width - compact_width) / 2;
+
+        if top >= 0 && top < i32::from(game.height) {
+            for logical_x in
+                compact_left.max(0)..(compact_left + compact_width).min(i32::from(game.width))
+            {
+                let index = (logical_x - compact_left) as usize;
+                let (symbol, color) = compact[index];
+                let x = area.x.saturating_add(logical_x as u16);
+                let y = area.y.saturating_add(top as u16);
+                if let Some(cell) = buffer.cell_mut((x, y)) {
+                    cell.set_char(symbol)
+                        .set_style(palette.fg(color).add_modifier(Modifier::BOLD));
+                }
+            }
+        }
+        return;
+    }
+
     let artwork = if options.ascii {
         &ASCII_BIRD
     } else {
         &UNICODE_BIRD
     };
-    let buffer = frame.buffer_mut();
-
     for logical_y in top.max(0)..bottom.min(i32::from(game.height)) {
         let template_y = ((logical_y - top) * artwork.len() as i32 / sprite_height) as usize;
         for logical_x in left.max(0)..right.min(i32::from(game.width)) {
@@ -531,6 +591,14 @@ fn project_ceil(value: f64, virtual_extent: u16, terminal_extent: u16) -> i32 {
     (value * f64::from(terminal_extent) / f64::from(virtual_extent)).ceil() as i32
 }
 
+fn project_round(value: f64, virtual_extent: u16, terminal_extent: u16) -> i32 {
+    (value * f64::from(terminal_extent) / f64::from(virtual_extent)).round() as i32
+}
+
+fn project_extent(value: u16, virtual_extent: u16, terminal_extent: u16) -> i32 {
+    project_round(f64::from(value), virtual_extent, terminal_extent).max(1)
+}
+
 fn visible_lower_pipe_top(projected_pipe_top: i32, projected_ground_top: i32) -> i32 {
     projected_pipe_top.min((projected_ground_top - 1).max(0))
 }
@@ -586,22 +654,45 @@ fn draw_overlay(
         .border_style(palette.fg(title_color))
         .style(palette.panel());
 
+    let compact = field.width < 24;
     let content = match overlay {
         Overlay::Ready => vec![
             Line::from(""),
             Line::styled(
-                "PRESS ENTER TO START",
+                if compact {
+                    "ENTER TO START"
+                } else {
+                    "PRESS ENTER TO START"
+                },
                 palette.fg(Palette::YELLOW).add_modifier(Modifier::BOLD),
             ),
-            Line::styled("Space flaps during flight.", palette.fg(Palette::TEXT)),
+            Line::styled(
+                if compact {
+                    "SPACE FLAPS"
+                } else {
+                    "Space flaps during flight."
+                },
+                palette.fg(Palette::TEXT),
+            ),
         ],
         Overlay::Paused => vec![
             Line::from(""),
             Line::styled(
-                "FLIGHT SUSPENDED",
+                if compact {
+                    "PAUSED"
+                } else {
+                    "FLIGHT SUSPENDED"
+                },
                 palette.fg(Palette::MAGENTA).add_modifier(Modifier::BOLD),
             ),
-            Line::styled("Press P to resume", palette.fg(Palette::TEXT)),
+            Line::styled(
+                if compact {
+                    "P TO RESUME"
+                } else {
+                    "Press P to resume"
+                },
+                palette.fg(Palette::TEXT),
+            ),
         ],
         Overlay::GameOver => {
             let best = best.max(game.score);
@@ -620,9 +711,19 @@ fn draw_overlay(
                 ),
                 None => Line::styled("NO MEDAL", palette.fg(Palette::DIM)),
             };
-            vec![
-                Line::from(""),
-                result,
+            let score = if compact {
+                Line::from(vec![
+                    Span::styled(
+                        format!("{:04}", game.score),
+                        palette.fg(Palette::YELLOW).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled("/", palette.fg(Palette::DIM)),
+                    Span::styled(
+                        format!("{best:04}"),
+                        palette.fg(Palette::MAGENTA).add_modifier(Modifier::BOLD),
+                    ),
+                ])
+            } else {
                 Line::from(vec![
                     Span::styled(
                         format!("{:04}", game.score),
@@ -633,11 +734,20 @@ fn draw_overlay(
                         format!("{best:04}"),
                         palette.fg(Palette::MAGENTA).add_modifier(Modifier::BOLD),
                     ),
-                ]),
+                ])
+            };
+            vec![
+                Line::from(""),
+                result,
+                score,
                 medal,
                 Line::from(""),
                 Line::styled(
-                    "PRESS ENTER TO RETRY",
+                    if compact {
+                        "ENTER TO RETRY"
+                    } else {
+                        "PRESS ENTER TO RETRY"
+                    },
                     palette.fg(Palette::YELLOW).add_modifier(Modifier::BOLD),
                 ),
             ]
@@ -777,10 +887,11 @@ mod tests {
     use ratatui::{Terminal, backend::TestBackend, layout::Rect, style::Color};
 
     use super::*;
+    use crate::game::{BIRD_START_X, Pipe};
 
     #[test]
-    fn field_dimensions_reserve_chrome_and_clamp_to_game_limits() {
-        assert_eq!(field_size(Rect::new(0, 0, 80, 24)), (78, 18));
+    fn field_dimensions_preserve_the_portrait_canvas() {
+        assert_eq!(field_size(Rect::new(0, 0, 80, 24)), (20, 18));
         assert_eq!(
             field_size(Rect::new(0, 0, 1, 1)),
             (MIN_FIELD_WIDTH, MIN_FIELD_HEIGHT)
@@ -789,18 +900,35 @@ mod tests {
             field_size(Rect::new(0, 0, u16::MAX, u16::MAX)),
             (MAX_FIELD_WIDTH, MAX_FIELD_HEIGHT)
         );
-        assert!(can_start_round(Rect::new(0, 0, 56, 20)));
-        assert!(!can_start_round(Rect::new(0, 0, 55, 20)));
-        assert!(!can_start_round(Rect::new(0, 0, 56, 19)));
+        assert!(can_start_round(Rect::new(0, 0, 36, 20)));
+        assert!(!can_start_round(Rect::new(0, 0, 35, 20)));
+        assert!(!can_start_round(Rect::new(0, 0, 36, 19)));
+
+        for area in [
+            Rect::new(0, 0, 80, 24),
+            Rect::new(0, 0, 100, 36),
+            Rect::new(0, 0, 200, 100),
+        ] {
+            let (width, height) = field_size(area);
+            let physical_aspect = f64::from(width) / (2.0 * f64::from(height));
+            let original_aspect = f64::from(VIRTUAL_WIDTH) / f64::from(VIRTUAL_HEIGHT);
+            assert!((physical_aspect - original_aspect).abs() < 0.02);
+        }
     }
 
     #[test]
-    fn required_size_and_fit_use_the_same_chrome_budget() {
-        let game = Game::new(70, 20, 7);
-        assert_eq!(required_size(&game), (72, 26));
-        assert!(fits(Rect::new(0, 0, 72, 26), &game));
-        assert!(!fits(Rect::new(0, 0, 71, 26), &game));
-        assert!(!fits(Rect::new(0, 0, 72, 25), &game));
+    fn hud_stays_readable_without_restretching_the_field() {
+        let game = Game::new(20, 18, 7);
+        assert_eq!(required_size(&game), (HUD_MIN_WIDTH, 24));
+        assert!(fits(Rect::new(0, 0, HUD_MIN_WIDTH, 24), &game));
+        assert!(!fits(Rect::new(0, 0, HUD_MIN_WIDTH - 1, 24), &game));
+        assert!(!fits(Rect::new(0, 0, HUD_MIN_WIDTH, 23), &game));
+
+        let stage = centered(Rect::new(0, 0, HUD_MIN_WIDTH, 24), HUD_MIN_WIDTH, 24);
+        let field_width = game.width + HORIZONTAL_CHROME;
+        let field_x = stage.x + (stage.width - field_width) / 2;
+        assert_eq!(field_width, 22);
+        assert_eq!(field_x, 7);
     }
 
     #[test]
@@ -837,7 +965,7 @@ mod tests {
     }
 
     #[test]
-    fn ready_card_keeps_the_enlarged_bird_visible() {
+    fn compact_ready_card_keeps_the_source_sized_bird_visible() {
         let game = Game::new(MIN_FIELD_WIDTH, MIN_FIELD_HEIGHT, 7);
         let (width, height) = required_size(&game);
         let backend = TestBackend::new(width, height);
@@ -854,7 +982,7 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect();
-        assert!(rendered.contains("PRESS ENTER TO START"));
+        assert!(rendered.contains("ENTER TO START"));
         assert!(rendered.contains('●'), "the ready card hid the bird's eye");
     }
 
@@ -877,7 +1005,7 @@ mod tests {
             .collect();
         assert!(rendered.contains("CURRENT"));
         assert!(rendered.contains("40x10"));
-        assert!(rendered.contains("56x20"));
+        assert!(rendered.contains("36x20"));
     }
 
     #[test]
@@ -901,36 +1029,112 @@ mod tests {
     }
 
     #[test]
-    fn standard_terminal_projects_original_visual_proportions() {
-        let width = 78;
+    fn portrait_field_projects_narrow_pipes_and_the_opaque_bird_art() {
+        let width = 20;
         let height = 18;
-        let bird_left = project_floor(
-            f64::from(crate::game::BIRD_START_X - BIRD_VISUAL_OFFSET),
-            VIRTUAL_WIDTH,
-            width,
-        );
-        let bird_right = project_ceil(
-            f64::from(crate::game::BIRD_START_X - BIRD_VISUAL_OFFSET + BIRD_VISUAL_SIZE),
-            VIRTUAL_WIDTH,
-            width,
-        );
 
-        assert_eq!(bird_right - bird_left, 14);
+        assert_eq!(project_extent(BIRD_ART_WIDTH, VIRTUAL_WIDTH, width), 2);
+        assert_eq!(project_extent(BIRD_ART_HEIGHT, VIRTUAL_HEIGHT, height), 1);
         assert_eq!(
             project_floor(f64::from(GROUND_Y), VIRTUAL_HEIGHT, height),
             14
         );
-        assert_eq!(
-            project_ceil(f64::from(PIPE_WIDTH), VIRTUAL_WIDTH, width),
-            15
-        );
+        assert_eq!(project_ceil(f64::from(PIPE_WIDTH), VIRTUAL_WIDTH, width), 4);
         assert_eq!(
             project_ceil(180.0, VIRTUAL_HEIGHT, height)
                 - project_floor(84.0, VIRTUAL_HEIGHT, height),
             5
         );
+        assert!(
+            project_extent(BIRD_ART_HEIGHT, VIRTUAL_HEIGHT, height)
+                < project_ceil(180.0, VIRTUAL_HEIGHT, height)
+                    - project_floor(84.0, VIRTUAL_HEIGHT, height)
+        );
+
+        assert_eq!(
+            project_extent(BIRD_ART_WIDTH, VIRTUAL_WIDTH, MAX_FIELD_WIDTH),
+            5
+        );
+        assert_eq!(
+            project_extent(BIRD_ART_HEIGHT, VIRTUAL_HEIGHT, MAX_FIELD_HEIGHT),
+            2
+        );
+        assert_eq!(
+            project_round(244.0, VIRTUAL_HEIGHT, MAX_FIELD_HEIGHT)
+                - project_round(197.0, VIRTUAL_HEIGHT, MAX_FIELD_HEIGHT),
+            4,
+            "one flap should visibly lift the two-row bird by two bird-heights"
+        );
+        assert_eq!(
+            project_ceil(f64::from(PIPE_WIDTH), VIRTUAL_WIDTH, MAX_FIELD_WIDTH),
+            9
+        );
         assert_eq!(visible_lower_pipe_top(10, 10), 9);
         assert_eq!(visible_lower_pipe_top(7, 14), 7);
+    }
+
+    #[test]
+    fn rendered_world_is_centered_and_uses_the_projected_geometry() {
+        let mut game = Game::new(20, 18, 7);
+        game.phase = Phase::Playing;
+        game.pipes = vec![Pipe {
+            x: 190.0,
+            gap_top: 180,
+            gap_height: 96,
+            scored: false,
+        }];
+        game.bird_x = f64::from(BIRD_START_X);
+        game.bird_y = 246.0;
+
+        let (width, height) = required_size(&game);
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| draw(frame, &game, 0, false, UiOptions::default()))
+            .expect("draw frame");
+
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(7, 3)].symbol(), "╔");
+        assert_eq!(buffer[(28, 3)].symbol(), "╗");
+
+        let pipe_cells: Vec<u16> = (0..width)
+            .filter(|x| matches!(buffer[(*x, 6)].symbol(), "█" | "▓"))
+            .collect();
+        assert_eq!(pipe_cells, vec![21, 22, 23, 24]);
+        assert_eq!(buffer[(13, 13)].symbol(), "●");
+        assert_eq!(buffer[(14, 13)].symbol(), "▶");
+    }
+
+    #[test]
+    fn large_pipe_has_a_wide_cap_and_visible_collision_edges() {
+        let mut game = Game::new(MAX_FIELD_WIDTH, MAX_FIELD_HEIGHT, 7);
+        game.phase = Phase::Playing;
+        game.pipes = vec![Pipe {
+            x: 0.0,
+            gap_top: 180,
+            gap_height: 96,
+            scored: false,
+        }];
+
+        let (width, height) = required_size(&game);
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| draw(frame, &game, 0, false, UiOptions::default()))
+            .expect("draw frame");
+
+        let buffer = terminal.backend().buffer();
+        let shaft: Vec<&str> = (1..=9).map(|x| buffer[(x, 6)].symbol()).collect();
+        let cap: Vec<&str> = (1..=9).map(|x| buffer[(x, 17)].symbol()).collect();
+
+        assert_eq!(shaft.first(), Some(&"▐"));
+        assert_eq!(shaft.last(), Some(&"▌"));
+        assert!(
+            shaft[1..8]
+                .iter()
+                .all(|symbol| matches!(*symbol, "█" | "▓"))
+        );
+        assert!(cap.iter().all(|symbol| *symbol == "█"));
     }
 
     #[test]
@@ -965,7 +1169,7 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect();
         assert!(rendered.contains("GOLD MEDAL"));
-        assert!(rendered.contains("PRESS ENTER TO RETRY"));
+        assert!(rendered.contains("ENTER TO RETRY"));
         assert!(!rendered.contains("Space to fly again"));
         assert!(!rendered.contains("R reset"));
         assert!(!rendered.contains("LEVEL"));

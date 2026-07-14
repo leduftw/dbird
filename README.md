@@ -4,7 +4,7 @@ A fully playable terminal recreation of the classic Flappy Bird game.
 
 ## Play
 
-You need Rust 1.88 or newer and an interactive terminal. The minimum window is 56x20; 80x24 or larger is recommended.
+You need Rust 1.88 or newer and an interactive terminal. The minimum window is 36x20; a window at least 36 rows tall is recommended for the fuller portrait view.
 
 ```sh
 cd ~/Developer/dbird
