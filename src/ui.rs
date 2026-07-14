@@ -14,6 +14,7 @@ use crate::game::{
     MAX_FIELD_HEIGHT, MAX_FIELD_WIDTH, MIN_FIELD_HEIGHT, MIN_FIELD_WIDTH, Medal, PIPE_WIDTH, Phase,
     VIRTUAL_HEIGHT, VIRTUAL_WIDTH,
 };
+use crate::theme::{ResolvedTheme, ThemeState};
 
 const HORIZONTAL_CHROME: u16 = 2;
 const VERTICAL_CHROME: u16 = 6;
@@ -43,6 +44,8 @@ pub struct UiOptions {
     pub ascii: bool,
     /// Enable the color palette.
     pub color: bool,
+    /// User-selected theme and its resolved light or dark appearance.
+    pub theme: ThemeState,
 }
 
 impl Default for UiOptions {
@@ -50,7 +53,15 @@ impl Default for UiOptions {
         Self {
             ascii: false,
             color: true,
+            theme: ThemeState::default(),
         }
+    }
+}
+
+impl UiOptions {
+    /// Advance System → Light → Dark → System.
+    pub fn cycle_theme(&mut self) {
+        self.theme.cycle();
     }
 }
 
@@ -116,7 +127,7 @@ pub fn fits(area: Rect, game: &Game) -> bool {
 /// Draw one complete game frame.
 pub fn draw(frame: &mut Frame<'_>, game: &Game, best: u32, new_best: bool, options: UiOptions) {
     let area = frame.area();
-    let palette = Palette::new(options.color);
+    let palette = Palette::new(options.color, options.theme.resolved());
 
     frame.render_widget(Block::default().style(palette.screen()), area);
 
@@ -152,6 +163,7 @@ pub fn draw(frame: &mut Frame<'_>, game: &Game, best: u32, new_best: bool, optio
 #[derive(Clone, Copy)]
 struct Palette {
     color: bool,
+    theme: ResolvedTheme,
 }
 
 impl Palette {
@@ -173,14 +185,71 @@ impl Palette {
     const TEXT: Color = Color::Rgb(222, 237, 248);
     const DIM: Color = Color::Rgb(72, 95, 119);
     const DANGER: Color = Color::Rgb(255, 87, 111);
+    const DAY_CLOUD: Color = Color::Rgb(239, 252, 247);
 
-    const fn new(color: bool) -> Self {
-        Self { color }
+    const LIGHT_SCREEN: Color = Color::Rgb(218, 238, 246);
+    const LIGHT_PANEL: Color = Color::Rgb(247, 252, 253);
+    const LIGHT_SKY_A: Color = Color::Rgb(112, 197, 206);
+    const LIGHT_SKY_B: Color = Color::Rgb(124, 203, 212);
+    const LIGHT_CYAN: Color = Color::Rgb(0, 105, 128);
+    const LIGHT_MAGENTA: Color = Color::Rgb(173, 42, 126);
+    const LIGHT_LIME: Color = Color::Rgb(44, 110, 20);
+    const LIGHT_LIME_SHADOW: Color = Color::Rgb(37, 105, 55);
+    const LIGHT_YELLOW: Color = Color::Rgb(130, 80, 0);
+    const LIGHT_ORANGE: Color = Color::Rgb(155, 65, 10);
+    const LIGHT_SILVER: Color = Color::Rgb(104, 119, 132);
+    const LIGHT_PLATINUM: Color = Color::Rgb(0, 126, 115);
+    const LIGHT_TEXT: Color = Color::Rgb(20, 48, 61);
+    const LIGHT_DIM: Color = Color::Rgb(62, 91, 105);
+    const LIGHT_DANGER: Color = Color::Rgb(194, 38, 64);
+
+    const fn new(color: bool, theme: ResolvedTheme) -> Self {
+        Self { color, theme }
+    }
+
+    fn resolve(self, color: Color) -> Color {
+        if self.theme == ResolvedTheme::Dark {
+            return color;
+        }
+
+        if color == Self::SCREEN {
+            Self::LIGHT_SCREEN
+        } else if color == Self::PANEL {
+            Self::LIGHT_PANEL
+        } else if color == Self::SKY_A {
+            Self::LIGHT_SKY_A
+        } else if color == Self::SKY_B {
+            Self::LIGHT_SKY_B
+        } else if color == Self::CYAN {
+            Self::LIGHT_CYAN
+        } else if color == Self::MAGENTA {
+            Self::LIGHT_MAGENTA
+        } else if color == Self::LIME {
+            Self::LIGHT_LIME
+        } else if color == Self::LIME_SHADOW {
+            Self::LIGHT_LIME_SHADOW
+        } else if color == Self::YELLOW {
+            Self::LIGHT_YELLOW
+        } else if color == Self::ORANGE {
+            Self::LIGHT_ORANGE
+        } else if color == Self::SILVER {
+            Self::LIGHT_SILVER
+        } else if color == Self::PLATINUM {
+            Self::LIGHT_PLATINUM
+        } else if color == Self::TEXT {
+            Self::LIGHT_TEXT
+        } else if color == Self::DIM {
+            Self::LIGHT_DIM
+        } else if color == Self::DANGER {
+            Self::LIGHT_DANGER
+        } else {
+            color
+        }
     }
 
     fn fg(self, color: Color) -> Style {
         if self.color {
-            Style::default().fg(color)
+            Style::default().fg(self.resolve(color))
         } else {
             Style::default()
         }
@@ -188,7 +257,9 @@ impl Palette {
 
     fn on(self, foreground: Color, background: Color) -> Style {
         if self.color {
-            Style::default().fg(foreground).bg(background)
+            Style::default()
+                .fg(self.resolve(foreground))
+                .bg(self.resolve(background))
         } else {
             Style::default()
         }
@@ -196,7 +267,7 @@ impl Palette {
 
     fn background(self, color: Color) -> Style {
         if self.color {
-            Style::default().bg(color)
+            Style::default().bg(self.resolve(color))
         } else {
             Style::default()
         }
@@ -208,6 +279,10 @@ impl Palette {
 
     fn panel(self) -> Style {
         self.background(Self::PANEL)
+    }
+
+    const fn is_light(self) -> bool {
+        matches!(self.theme, ResolvedTheme::Light)
     }
 }
 
@@ -325,7 +400,7 @@ fn draw_field(
         area.height.saturating_sub(2),
     );
 
-    draw_sky(frame, inner, game.elapsed, palette);
+    draw_sky(frame, inner, game.elapsed, options, palette);
     draw_pipes(frame, inner, game, options, palette);
     draw_bird(frame, inner, game, options, palette);
     draw_ground(frame, inner, options, palette);
@@ -365,7 +440,7 @@ fn draw_field(
     }
 }
 
-fn draw_sky(frame: &mut Frame<'_>, area: Rect, elapsed: f64, palette: Palette) {
+fn draw_sky(frame: &mut Frame<'_>, area: Rect, elapsed: f64, options: UiOptions, palette: Palette) {
     let drift = (elapsed * 2.0).floor().max(0.0) as u64;
     let buffer = frame.buffer_mut();
 
@@ -378,10 +453,26 @@ fn draw_sky(frame: &mut Frame<'_>, area: Rect, elapsed: f64, palette: Palette) {
             } else {
                 Palette::SKY_B
             };
-            let hash = (u64::from(logical_x) + drift)
+            let shifted_x = u64::from(logical_x) + drift;
+            let hash = shifted_x
                 .wrapping_mul(73)
                 .wrapping_add(u64::from(logical_y).wrapping_mul(151));
-            let (symbol, foreground) = if hash % 211 == 0 {
+            let (symbol, foreground) = if palette.is_light() {
+                let sun_x = area.width.saturating_sub(3);
+                let cloud_hash = (shifted_x / 3)
+                    .wrapping_mul(73)
+                    .wrapping_add(u64::from(logical_y).wrapping_mul(151));
+                if logical_y == 1 && logical_x == sun_x {
+                    (if options.ascii { "*" } else { "●" }, Palette::YELLOW)
+                } else if logical_y > 2
+                    && logical_y < area.height.saturating_sub(4)
+                    && cloud_hash % 97 == 0
+                {
+                    (if options.ascii { "." } else { "░" }, Palette::DAY_CLOUD)
+                } else {
+                    (" ", Palette::DAY_CLOUD)
+                }
+            } else if hash % 211 == 0 {
                 ("+", Palette::TEXT)
             } else if hash % 79 == 0 {
                 (".", Palette::DIM)
@@ -473,15 +564,81 @@ fn draw_pipes(
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BirdPose {
+    Up,
+    Level,
+    Down,
+}
+
+const BIRD_UP_ANGLE_CUTOFF: f64 = -5.0;
+const BIRD_DOWN_ANGLE_CUTOFF: f64 = 30.0;
+
+const UNICODE_BIRD_UP: [[char; 6]; 2] = [
+    [' ', '╭', '─', '●', '↗', '↗'],
+    ['╰', '━', '╯', '╱', ' ', ' '],
+];
+const UNICODE_BIRD_LEVEL: [[char; 6]; 2] = [
+    [' ', '╭', '─', '●', '▶', '▶'],
+    ['╰', '━', '╯', '─', '▶', ' '],
+];
+const UNICODE_BIRD_DOWN: [[char; 6]; 2] = [
+    [' ', '╭', '─', '●', '╲', ' '],
+    ['╰', '━', '╯', '─', '↘', '↘'],
+];
+const ASCII_BIRD_UP: [[char; 6]; 2] = [
+    [' ', '.', '-', 'o', '^', '^'],
+    ['<', '=', '/', '/', ' ', ' '],
+];
+const ASCII_BIRD_LEVEL: [[char; 6]; 2] = [
+    [' ', '.', '-', 'o', '>', '>'],
+    ['<', '=', '/', '-', '>', ' '],
+];
+const ASCII_BIRD_DOWN: [[char; 6]; 2] = [
+    [' ', '.', '-', 'o', '\\', ' '],
+    ['<', '=', '/', '-', 'v', 'v'],
+];
+
+fn bird_pose(game: &Game) -> BirdPose {
+    bird_pose_for(game.phase, game.bird_angle())
+}
+
+fn bird_pose_for(phase: Phase, angle: f64) -> BirdPose {
+    if phase == Phase::Ready {
+        BirdPose::Level
+    } else if phase == Phase::GameOver || angle >= BIRD_DOWN_ANGLE_CUTOFF {
+        BirdPose::Down
+    } else if angle < BIRD_UP_ANGLE_CUTOFF {
+        BirdPose::Up
+    } else {
+        BirdPose::Level
+    }
+}
+
+const fn bird_artwork(pose: BirdPose, ascii: bool) -> &'static [[char; 6]; 2] {
+    match (ascii, pose) {
+        (false, BirdPose::Up) => &UNICODE_BIRD_UP,
+        (false, BirdPose::Level) => &UNICODE_BIRD_LEVEL,
+        (false, BirdPose::Down) => &UNICODE_BIRD_DOWN,
+        (true, BirdPose::Up) => &ASCII_BIRD_UP,
+        (true, BirdPose::Level) => &ASCII_BIRD_LEVEL,
+        (true, BirdPose::Down) => &ASCII_BIRD_DOWN,
+    }
+}
+
+const fn compact_bird(pose: BirdPose, ascii: bool) -> [(char, Color); 2] {
+    match (ascii, pose) {
+        (false, BirdPose::Up) => [('●', Palette::TEXT), ('↗', Palette::ORANGE)],
+        (false, BirdPose::Level) => [('●', Palette::TEXT), ('▶', Palette::ORANGE)],
+        (false, BirdPose::Down) => [('●', Palette::TEXT), ('↘', Palette::ORANGE)],
+        (true, BirdPose::Up) => [('o', Palette::TEXT), ('^', Palette::ORANGE)],
+        (true, BirdPose::Level) => [('o', Palette::TEXT), ('>', Palette::ORANGE)],
+        (true, BirdPose::Down) => [('o', Palette::TEXT), ('v', Palette::ORANGE)],
+    }
+}
+
 fn draw_bird(frame: &mut Frame<'_>, area: Rect, game: &Game, options: UiOptions, palette: Palette) {
-    const UNICODE_BIRD: [[char; 6]; 2] = [
-        [' ', '╭', '─', '●', '▶', '▶'],
-        ['╰', '━', '╯', '─', '▶', ' '],
-    ];
-    const ASCII_BIRD: [[char; 6]; 2] = [
-        [' ', '.', '-', 'o', '>', '>'],
-        ['<', '=', '/', '-', '>', ' '],
-    ];
+    let pose = bird_pose(game);
 
     // The source atlas stores each bird in a transparent 48x48 frame. Only a
     // 34x24 rectangle is opaque, so rendering the whole frame makes the bird
@@ -497,11 +654,7 @@ fn draw_bird(frame: &mut Frame<'_>, area: Rect, game: &Game, options: UiOptions,
     let buffer = frame.buffer_mut();
 
     if sprite_height == 1 {
-        let compact = if options.ascii {
-            [('o', Palette::TEXT), ('>', Palette::ORANGE)]
-        } else {
-            [('●', Palette::TEXT), ('▶', Palette::ORANGE)]
-        };
+        let compact = compact_bird(pose, options.ascii);
         let compact_width = sprite_width.min(compact.len() as i32);
         let compact_left = left + (sprite_width - compact_width) / 2;
 
@@ -522,11 +675,7 @@ fn draw_bird(frame: &mut Frame<'_>, area: Rect, game: &Game, options: UiOptions,
         return;
     }
 
-    let artwork = if options.ascii {
-        &ASCII_BIRD
-    } else {
-        &UNICODE_BIRD
-    };
+    let artwork = bird_artwork(pose, options.ascii);
     for logical_y in top.max(0)..bottom.min(i32::from(game.height)) {
         let template_y = ((logical_y - top) * artwork.len() as i32 / sprite_height) as usize;
         for logical_x in left.max(0)..right.min(i32::from(game.width)) {
@@ -537,7 +686,7 @@ fn draw_bird(frame: &mut Frame<'_>, area: Rect, game: &Game, options: UiOptions,
                 continue;
             }
 
-            let color = if matches!(symbol, '>' | '▶') {
+            let color = if matches!(symbol, '>' | '▶' | '^' | 'v' | '↗' | '↘') {
                 Palette::ORANGE
             } else if matches!(symbol, 'o' | '●') {
                 Palette::TEXT
@@ -780,7 +929,7 @@ fn draw_footer(
     options: UiOptions,
     palette: Palette,
 ) {
-    let separator = if options.ascii { "  |  " } else { "  │  " };
+    let separator = "  ";
     let mut spans = match phase {
         Phase::Ready => vec![
             key_span("ENTER", Palette::CYAN, palette),
@@ -804,6 +953,12 @@ fn draw_footer(
         ],
     };
     spans.extend([
+        Span::styled(separator, palette.fg(Palette::DIM)),
+        key_span("T", Palette::YELLOW, palette),
+        Span::styled(
+            format!(" {}", options.theme.mode().label()),
+            palette.fg(Palette::DIM),
+        ),
         Span::styled(separator, palette.fg(Palette::DIM)),
         key_span("Q", Palette::DANGER, palette),
         Span::styled(" quit", palette.fg(Palette::DIM)),
@@ -864,9 +1019,15 @@ fn draw_too_small(
         Line::from(""),
         Line::styled(
             if can_start_round(area) && matches!(game.phase, Phase::Ready | Phase::GameOver) {
-                "ENTER fit and start  |  Q quit"
+                format!(
+                    "ENTER fit/start  T {}  Q quit",
+                    options.theme.mode().label()
+                )
             } else {
-                "Resize to continue  |  Q quit"
+                format!(
+                    "Resize to continue  T {}  Q quit",
+                    options.theme.mode().label()
+                )
             },
             palette.fg(Palette::DIM),
         ),
@@ -884,10 +1045,107 @@ fn draw_too_small(
 
 #[cfg(test)]
 mod tests {
-    use ratatui::{Terminal, backend::TestBackend, layout::Rect, style::Color};
+    use ratatui::{
+        Terminal,
+        backend::TestBackend,
+        layout::Rect,
+        style::{Color, Style},
+    };
 
     use super::*;
-    use crate::game::{BIRD_START_X, Pipe};
+    use crate::game::{BIRD_START_X, FIXED_STEP_SECONDS, Pipe};
+    use crate::theme::ThemeMode;
+
+    fn test_options(ascii: bool, mode: ThemeMode) -> UiOptions {
+        UiOptions {
+            ascii,
+            color: true,
+            theme: ThemeState::explicit(mode),
+        }
+    }
+
+    fn game_with_pose(pose: BirdPose, width: u16, height: u16) -> Game {
+        let mut game = Game::new(width, height, 7);
+        match pose {
+            BirdPose::Level => game.phase = Phase::Playing,
+            BirdPose::Up => {
+                assert!(game.start());
+                game.update(FIXED_STEP_SECONDS);
+            }
+            BirdPose::Down => {
+                assert!(game.start());
+                for _ in 0..45 {
+                    game.update(FIXED_STEP_SECONDS);
+                }
+            }
+        }
+        assert_eq!(bird_pose(&game), pose);
+        game.bird_x = f64::from(BIRD_START_X);
+        game.bird_y = 246.0;
+        game
+    }
+
+    fn isolated_bird_rows(pose: BirdPose, ascii: bool, width: u16, height: u16) -> Vec<String> {
+        let game = game_with_pose(pose, width, height);
+        let options = test_options(ascii, ThemeMode::Dark);
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| {
+                draw_bird(
+                    frame,
+                    Rect::new(0, 0, width, height),
+                    &game,
+                    options,
+                    Palette::new(true, ResolvedTheme::Dark),
+                );
+            })
+            .expect("draw bird");
+
+        let left = project_round(
+            game.bird_x - f64::from(BIRD_ART_OFFSET_X),
+            VIRTUAL_WIDTH,
+            width,
+        ) as u16;
+        let top = project_round(
+            game.bird_y - f64::from(BIRD_ART_OFFSET_Y),
+            VIRTUAL_HEIGHT,
+            height,
+        ) as u16;
+        let sprite_width = project_extent(BIRD_ART_WIDTH, VIRTUAL_WIDTH, width) as u16;
+        let sprite_height = project_extent(BIRD_ART_HEIGHT, VIRTUAL_HEIGHT, height) as u16;
+        let buffer = terminal.backend().buffer();
+
+        (top..top + sprite_height)
+            .map(|y| {
+                (left..left + sprite_width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    fn contrast_ratio(foreground: Color, background: Color) -> f64 {
+        fn luminance(color: Color) -> f64 {
+            fn linear(channel: u8) -> f64 {
+                let channel = f64::from(channel) / 255.0;
+                if channel <= 0.04045 {
+                    channel / 12.92
+                } else {
+                    ((channel + 0.055) / 1.055).powf(2.4)
+                }
+            }
+
+            let Color::Rgb(red, green, blue) = color else {
+                panic!("contrast tests require RGB colors");
+            };
+            0.2126 * linear(red) + 0.7152 * linear(green) + 0.0722 * linear(blue)
+        }
+
+        let lighter = luminance(foreground).max(luminance(background));
+        let darker = luminance(foreground).min(luminance(background));
+        (lighter + 0.05) / (darker + 0.05)
+    }
 
     #[test]
     fn field_dimensions_preserve_the_portrait_canvas() {
@@ -932,6 +1190,181 @@ mod tests {
     }
 
     #[test]
+    fn bird_pose_buckets_the_original_rotation_without_moving_the_hitbox() {
+        assert_eq!(bird_pose_for(Phase::Ready, -20.0), BirdPose::Level);
+        assert_eq!(bird_pose_for(Phase::Playing, -5.01), BirdPose::Up);
+        assert_eq!(bird_pose_for(Phase::Playing, -5.0), BirdPose::Level);
+        assert_eq!(bird_pose_for(Phase::Paused, 0.0), BirdPose::Level);
+        assert_eq!(bird_pose_for(Phase::Dying, 29.99), BirdPose::Level);
+        assert_eq!(bird_pose_for(Phase::Dying, 30.0), BirdPose::Down);
+        assert_eq!(bird_pose_for(Phase::GameOver, -20.0), BirdPose::Down);
+        assert_eq!(bird_pose_for(Phase::Playing, f64::NAN), BirdPose::Level);
+
+        for pose in [BirdPose::Up, BirdPose::Level, BirdPose::Down] {
+            let game = game_with_pose(pose, MAX_FIELD_WIDTH, MAX_FIELD_HEIGHT);
+            assert_eq!(game.bird_x, f64::from(BIRD_START_X));
+            assert_eq!(game.bird_y, 246.0);
+            assert_eq!(project_extent(BIRD_ART_WIDTH, VIRTUAL_WIDTH, game.width), 5);
+            assert_eq!(
+                project_extent(BIRD_ART_HEIGHT, VIRTUAL_HEIGHT, game.height),
+                2
+            );
+        }
+    }
+
+    #[test]
+    fn full_size_bird_has_distinct_up_level_and_down_silhouettes() {
+        assert_eq!(
+            isolated_bird_rows(BirdPose::Up, false, MAX_FIELD_WIDTH, MAX_FIELD_HEIGHT),
+            [" ╭─●↗", "╰━╯╱ "]
+        );
+        assert_eq!(
+            isolated_bird_rows(BirdPose::Level, false, MAX_FIELD_WIDTH, MAX_FIELD_HEIGHT),
+            [" ╭─●▶", "╰━╯─▶"]
+        );
+        assert_eq!(
+            isolated_bird_rows(BirdPose::Down, false, MAX_FIELD_WIDTH, MAX_FIELD_HEIGHT),
+            [" ╭─●╲", "╰━╯─↘"]
+        );
+
+        assert_eq!(
+            isolated_bird_rows(BirdPose::Up, true, MAX_FIELD_WIDTH, MAX_FIELD_HEIGHT),
+            [" .-o^", "<=// "]
+        );
+        assert_eq!(
+            isolated_bird_rows(BirdPose::Level, true, MAX_FIELD_WIDTH, MAX_FIELD_HEIGHT),
+            [" .-o>", "<=/->"]
+        );
+        assert_eq!(
+            isolated_bird_rows(BirdPose::Down, true, MAX_FIELD_WIDTH, MAX_FIELD_HEIGHT),
+            [" .-o\\", "<=/-v"]
+        );
+    }
+
+    #[test]
+    fn compact_bird_still_shows_each_rotation() {
+        for (pose, unicode, ascii) in [
+            (BirdPose::Up, "●↗", "o^"),
+            (BirdPose::Level, "●▶", "o>"),
+            (BirdPose::Down, "●↘", "ov"),
+        ] {
+            assert_eq!(isolated_bird_rows(pose, false, 20, 18), [unicode]);
+            assert_eq!(isolated_bird_rows(pose, true, 20, 18), [ascii]);
+        }
+
+        for artwork in [ASCII_BIRD_UP, ASCII_BIRD_LEVEL, ASCII_BIRD_DOWN] {
+            assert!(artwork.into_iter().flatten().all(|glyph| glyph.is_ascii()));
+        }
+    }
+
+    #[test]
+    fn light_theme_is_daytime_and_dark_theme_is_nighttime() {
+        let width = 20;
+        let height = 10;
+
+        let light_backend = TestBackend::new(width, height);
+        let mut light_terminal = Terminal::new(light_backend).expect("test terminal");
+        light_terminal
+            .draw(|frame| {
+                draw_sky(
+                    frame,
+                    Rect::new(0, 0, width, height),
+                    0.0,
+                    test_options(false, ThemeMode::Light),
+                    Palette::new(true, ResolvedTheme::Light),
+                );
+            })
+            .expect("draw daylight");
+
+        let dark_backend = TestBackend::new(width, height);
+        let mut dark_terminal = Terminal::new(dark_backend).expect("test terminal");
+        dark_terminal
+            .draw(|frame| {
+                draw_sky(
+                    frame,
+                    Rect::new(0, 0, width, height),
+                    0.0,
+                    test_options(false, ThemeMode::Dark),
+                    Palette::new(true, ResolvedTheme::Dark),
+                );
+            })
+            .expect("draw nighttime");
+
+        let light = light_terminal.backend().buffer();
+        let dark = dark_terminal.backend().buffer();
+        assert_eq!(light[(17, 1)].symbol(), "●");
+        assert_ne!(dark[(17, 1)].symbol(), "●");
+        assert_eq!(light[(0, 0)].bg, Palette::LIGHT_SKY_A);
+        assert_eq!(light[(0, 1)].bg, Palette::LIGHT_SKY_B);
+        assert_eq!(dark[(0, 0)].bg, Palette::SKY_A);
+        assert_eq!(dark[(0, 1)].bg, Palette::SKY_B);
+
+        for theme in [ResolvedTheme::Light, ResolvedTheme::Dark] {
+            let palette = Palette::new(false, theme);
+            assert_eq!(palette.screen(), Style::default());
+            assert_eq!(palette.panel(), Style::default());
+            assert_eq!(palette.fg(Palette::TEXT), Style::default());
+        }
+    }
+
+    #[test]
+    fn daylight_keeps_the_bird_pipes_and_prompts_high_contrast() {
+        for foreground in [
+            Palette::LIGHT_YELLOW,
+            Palette::LIGHT_ORANGE,
+            Palette::LIGHT_LIME,
+        ] {
+            for background in [Palette::LIGHT_SKY_A, Palette::LIGHT_SKY_B] {
+                assert!(
+                    contrast_ratio(foreground, background) >= 3.0,
+                    "{foreground:?} washed out against {background:?}"
+                );
+            }
+        }
+
+        for foreground in [Palette::LIGHT_TEXT, Palette::LIGHT_YELLOW] {
+            assert!(
+                contrast_ratio(foreground, Palette::LIGHT_PANEL) >= 4.5,
+                "{foreground:?} was hard to read on the daylight panel"
+            );
+        }
+    }
+
+    #[test]
+    fn minimum_footer_exposes_each_theme_choice_without_clipping() {
+        for (mode, label) in [
+            (ThemeMode::System, "T SYS"),
+            (ThemeMode::Light, "T LGT"),
+            (ThemeMode::Dark, "T DRK"),
+        ] {
+            let backend = TestBackend::new(HUD_MIN_WIDTH, 1);
+            let mut terminal = Terminal::new(backend).expect("test terminal");
+            terminal
+                .draw(|frame| {
+                    let options = test_options(false, mode);
+                    draw_footer(
+                        frame,
+                        Rect::new(0, 0, HUD_MIN_WIDTH, 1),
+                        Phase::Playing,
+                        options,
+                        Palette::new(true, options.theme.resolved()),
+                    );
+                })
+                .expect("draw footer");
+
+            let rendered: String = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect();
+            assert!(rendered.contains(label));
+            assert!(rendered.contains("Q quit"));
+        }
+    }
+
+    #[test]
     fn ascii_mode_contains_no_non_ascii_artwork() {
         let game = Game::new(MIN_FIELD_WIDTH, MIN_FIELD_HEIGHT, 7);
         let (width, height) = required_size(&game);
@@ -948,6 +1381,7 @@ mod tests {
                     UiOptions {
                         ascii: true,
                         color: false,
+                        theme: ThemeState::explicit(ThemeMode::Dark),
                     },
                 );
             })
@@ -1025,7 +1459,8 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect();
-        assert!(rendered.contains("ENTER fit and start"));
+        assert!(rendered.contains("ENTER fit/start"));
+        assert!(rendered.contains("T SYS"));
     }
 
     #[test]
@@ -1156,6 +1591,7 @@ mod tests {
                     UiOptions {
                         ascii: true,
                         color: false,
+                        theme: ThemeState::explicit(ThemeMode::Dark),
                     },
                 );
             })

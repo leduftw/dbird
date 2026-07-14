@@ -11,6 +11,7 @@ use dbird::game::{DeathCause, Game, Phase};
 use dbird::signals::ShutdownSignals;
 use dbird::storage::HighScoreStore;
 use dbird::terminal::{TerminalSession, install_panic_hook};
+use dbird::theme::ThemeState;
 use dbird::ui::{self, UiOptions};
 use ratatui::layout::Rect;
 
@@ -24,6 +25,7 @@ enum KeyAction {
     Quit,
     Flap,
     Start,
+    CycleTheme,
 }
 
 fn main() -> ExitCode {
@@ -63,9 +65,10 @@ fn run_game(options: CliOptions) -> Result<(), Box<dyn Error>> {
     let (field_width, field_height) = ui::field_size(initial_area);
     let seed = options.seed.unwrap_or_else(random_seed);
     let mut game = Game::new(field_width, field_height, seed);
-    let ui_options = UiOptions {
+    let mut ui_options = UiOptions {
         ascii: options.ascii,
         color: !options.no_color,
+        theme: ThemeState::default(),
     };
 
     let mut last_loop = Instant::now();
@@ -170,6 +173,7 @@ fn run_game(options: CliOptions) -> Result<(), Box<dyn Error>> {
                             pending_sounds.clear();
                             audio.play(Sound::Wing);
                         }
+                        KeyAction::CycleTheme => ui_options.cycle_theme(),
                         KeyAction::None => {}
                     }
                 }
@@ -224,6 +228,16 @@ fn handle_key(
             }
         }
         return KeyAction::None;
+    }
+
+    if let KeyCode::Char(character) = key.code
+        && character.eq_ignore_ascii_case(&'t')
+        && key.kind == KeyEventKind::Press
+        && !key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+    {
+        return KeyAction::CycleTheme;
     }
 
     if !terminal_fits {
@@ -375,6 +389,79 @@ mod tests {
         );
 
         assert_eq!(game.phase, Phase::Ready);
+    }
+
+    #[test]
+    fn theme_key_works_in_every_phase_and_even_in_the_resize_screen() {
+        for (phase, terminal_fits) in [
+            (Phase::Ready, true),
+            (Phase::Playing, true),
+            (Phase::Paused, true),
+            (Phase::Dying, true),
+            (Phase::GameOver, true),
+            (Phase::Ready, false),
+        ] {
+            let mut game = Game::new(80, 20, 7);
+            game.phase = phase;
+            game.score = 12;
+            let mut new_best = true;
+            let before = (game.phase, game.score, game.bird_y, game.bird_velocity);
+
+            assert_eq!(
+                handle_key(
+                    key(KeyCode::Char('t')),
+                    Rect::new(0, 0, 82, 26),
+                    terminal_fits,
+                    &mut game,
+                    &mut new_best,
+                ),
+                KeyAction::CycleTheme
+            );
+            assert_eq!(
+                (game.phase, game.score, game.bird_y, game.bird_velocity),
+                before
+            );
+            assert!(new_best);
+
+            assert_eq!(
+                handle_key(
+                    repeated_key(KeyCode::Char('t')),
+                    Rect::new(0, 0, 82, 26),
+                    terminal_fits,
+                    &mut game,
+                    &mut new_best,
+                ),
+                KeyAction::None
+            );
+        }
+
+        for modifiers in [KeyModifiers::CONTROL, KeyModifiers::ALT] {
+            let mut game = Game::new(80, 20, 7);
+            let mut new_best = false;
+            assert_eq!(
+                handle_key(
+                    KeyEvent::new(KeyCode::Char('t'), modifiers),
+                    Rect::new(0, 0, 82, 26),
+                    true,
+                    &mut game,
+                    &mut new_best,
+                ),
+                KeyAction::None
+            );
+        }
+
+        let mut game = Game::new(80, 20, 7);
+        let mut new_best = false;
+        assert_eq!(
+            handle_key(
+                KeyEvent::new(KeyCode::Char('T'), KeyModifiers::SHIFT),
+                Rect::new(0, 0, 82, 26),
+                true,
+                &mut game,
+                &mut new_best,
+            ),
+            KeyAction::CycleTheme
+        );
     }
 
     #[test]

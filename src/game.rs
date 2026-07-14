@@ -62,6 +62,14 @@ pub const FLAP_VELOCITY: f64 = -5.0;
 pub const GRAVITY_PER_TICK: f64 = 0.3;
 /// Maximum downward velocity, in virtual pixels per tick.
 pub const MAX_FALL_VELOCITY: f64 = 8.0;
+/// Most upward visual rotation used by the original bird sprite, in degrees.
+pub const MIN_BIRD_ANGLE: f64 = -20.0;
+/// Most downward visual rotation used by the original bird sprite, in degrees.
+pub const MAX_BIRD_ANGLE: f64 = 90.0;
+/// Angular velocity applied by a flap, in degrees per simulation tick.
+pub const FLAP_ANGULAR_VELOCITY: f64 = -10.0;
+/// Downward angular acceleration applied on every simulation tick.
+pub const BIRD_ANGULAR_ACCELERATION: f64 = 0.4;
 /// Horizontal movement of every pipe on each simulation tick.
 pub const PIPE_SPEED_PER_TICK: f64 = 2.0;
 /// Number of fixed ticks between a fatal collision and the result card.
@@ -148,6 +156,8 @@ pub struct Game {
     pub bird_y: f64,
     /// Bird velocity in virtual pixels per simulation tick.
     pub bird_velocity: f64,
+    bird_angle: f64,
+    bird_angle_velocity: f64,
     pub pipes: Vec<Pipe>,
     pub score: u32,
     pub phase: Phase,
@@ -173,6 +183,8 @@ impl Game {
             bird_x: 0.0,
             bird_y: 0.0,
             bird_velocity: 0.0,
+            bird_angle: 0.0,
+            bird_angle_velocity: 0.0,
             pipes: Vec::new(),
             score: 0,
             phase: Phase::Ready,
@@ -195,6 +207,7 @@ impl Game {
         if self.phase == Phase::Ready {
             self.phase = Phase::Playing;
             self.bird_velocity = FLAP_VELOCITY;
+            self.bird_angle_velocity = FLAP_ANGULAR_VELOCITY;
             true
         } else {
             false
@@ -208,6 +221,7 @@ impl Game {
     pub fn flap(&mut self) -> bool {
         if self.phase == Phase::Playing && self.bird_y >= 0.0 {
             self.bird_velocity = FLAP_VELOCITY;
+            self.bird_angle_velocity = FLAP_ANGULAR_VELOCITY;
             true
         } else {
             false
@@ -286,6 +300,11 @@ impl Game {
         PIPE_GAP_HEIGHT
     }
 
+    /// Current visual rotation of the bird, in degrees.
+    pub const fn bird_angle(&self) -> f64 {
+        self.bird_angle
+    }
+
     /// Medal currently earned by the round's score.
     pub const fn medal(&self) -> Option<Medal> {
         Medal::for_score(self.score)
@@ -300,6 +319,8 @@ impl Game {
         self.bird_x = f64::from(BIRD_START_X);
         self.bird_y = f64::from(BIRD_START_Y);
         self.bird_velocity = 0.0;
+        self.bird_angle = 0.0;
+        self.bird_angle_velocity = 0.0;
         self.pipes.clear();
         self.score = 0;
         self.phase = Phase::Ready;
@@ -353,6 +374,12 @@ impl Game {
         // The APK stores position as an integer and uses a compound assignment
         // from a floating-point velocity. Java truncates that result toward zero.
         self.bird_y = (self.bird_y + self.bird_velocity).trunc();
+
+        // Rotation has its own angular momentum in the original game. A flap
+        // kicks it upward, then this acceleration gradually turns the nose down.
+        self.bird_angle += self.bird_angle_velocity;
+        self.bird_angle_velocity += BIRD_ANGULAR_ACCELERATION;
+        self.bird_angle = self.bird_angle.clamp(MIN_BIRD_ANGLE, MAX_BIRD_ANGLE);
     }
 
     fn activate_pipes(&mut self) {
@@ -508,6 +535,7 @@ mod tests {
         assert_eq!(game.height, MAX_FIELD_HEIGHT);
         assert_eq!(game.bird_x, f64::from(BIRD_START_X));
         assert_eq!(game.bird_y, f64::from(BIRD_START_Y));
+        assert_eq!(game.bird_angle(), 0.0);
         assert_eq!(game.phase, Phase::Ready);
         assert_eq!(game.score, 0);
         assert_eq!(game.elapsed, 0.0);
@@ -534,6 +562,7 @@ mod tests {
         assert!(game.start());
         assert_eq!(game.phase, Phase::Playing);
         assert_eq!(game.bird_velocity, FLAP_VELOCITY);
+        assert_eq!(game.bird_angle(), 0.0);
 
         game.phase = Phase::GameOver;
         assert!(!game.flap());
@@ -556,14 +585,37 @@ mod tests {
         game.update(TICK);
         assert!((game.bird_velocity - (-4.7)).abs() < 1e-10);
         assert_eq!(game.bird_y, 241.0);
+        assert_eq!(game.bird_angle(), -10.0);
 
         game.update(TICK);
         assert!((game.bird_velocity - (-4.4)).abs() < 1e-10);
         assert_eq!(game.bird_y, 236.0);
+        assert!((game.bird_angle() - (-19.6)).abs() < 1e-10);
 
         game.bird_velocity = 7.9;
         game.update(TICK);
         assert_eq!(game.bird_velocity, MAX_FALL_VELOCITY);
+    }
+
+    #[test]
+    fn bird_rotation_keeps_the_original_flap_inertia_and_angle_limits() {
+        let mut game = playing_game();
+
+        game.update(TICK * 3.0);
+        assert_eq!(game.bird_angle(), MIN_BIRD_ANGLE);
+
+        // A flap resets angular velocity, not the current angle. This makes a
+        // falling bird sweep back upward instead of snapping between poses.
+        game.bird_angle = 60.0;
+        assert!(game.flap());
+        assert_eq!(game.bird_angle(), 60.0);
+        game.update(TICK);
+        assert_eq!(game.bird_angle(), 50.0);
+
+        for _ in 0..100 {
+            game.update(TICK);
+        }
+        assert_eq!(game.bird_angle(), MAX_BIRD_ANGLE);
     }
 
     #[test]
@@ -592,6 +644,7 @@ mod tests {
 
         assert_eq!(whole.bird_y, partitioned.bird_y);
         assert!((whole.bird_velocity - partitioned.bird_velocity).abs() < 1e-10);
+        assert!((whole.bird_angle() - partitioned.bird_angle()).abs() < 1e-10);
         assert!((whole.elapsed - partitioned.elapsed).abs() < 1e-10);
         assert_eq!(whole.pipes, partitioned.pipes);
     }
@@ -608,6 +661,7 @@ mod tests {
         assert_eq!(game.phase, Phase::Paused);
         assert_eq!(game.bird_y, frozen.bird_y);
         assert_eq!(game.bird_velocity, frozen.bird_velocity);
+        assert_eq!(game.bird_angle(), frozen.bird_angle());
         assert_eq!(game.pipes, frozen.pipes);
         assert_eq!(game.elapsed, frozen.elapsed);
 

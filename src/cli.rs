@@ -13,6 +13,13 @@ dbird - a terminal recreation of the classic Flappy Bird game
 
 Usage: dbird [OPTIONS]
 
+Controls:
+  Enter                Start / retry
+  Space, Up, W, or K   Flap during flight
+  P                    Pause / resume
+  T                    Cycle System / Light / Dark theme
+  Q, Esc, or Ctrl-C    Quit
+
 Options:
       --ascii          Use ASCII-only graphics
       --no-color       Disable colored output
@@ -249,6 +256,9 @@ mod tests {
         ] {
             assert!(HELP_TEXT.contains(option), "help omitted {option}");
         }
+        for control in ["Enter", "Flap during flight", "Cycle System / Light / Dark"] {
+            assert!(HELP_TEXT.contains(control), "help omitted {control}");
+        }
     }
 
     #[test]
@@ -266,7 +276,7 @@ mod tests {
 
     #[test]
     fn version_line_uses_package_metadata() {
-        assert_eq!(version_text(), "dbird 0.1.0");
+        assert_eq!(version_text(), "dbird 1.0.0");
     }
 
     #[cfg(unix)]

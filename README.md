@@ -18,11 +18,14 @@ cargo run --release
 | `Enter` | Start / retry |
 | `Space`, `↑`, `W`, or `K` | Flap during flight |
 | `P` | Pause or resume |
+| `T` | Cycle System / Light / Dark theme |
 | `Q`, `Esc`, or `Ctrl-C` | Quit |
 
 Pass through each pipe opening to score. Pipe speed, pipe spacing, opening size, and flight physics stay fixed for the entire run, just like the original game. Scores of 10, 20, 30, and 40 award Bronze, Silver, Gold, and Platinum medals respectively. If the terminal becomes too small, the round is safely suspended; enlarge it and resume when ready.
 
 The original Android sound effects accompany flaps, points, collisions, and result transitions. Their separate rights notice is in [`assets/sounds/NOTICE.md`](assets/sounds/NOTICE.md).
+
+The theme starts in System mode on every launch. On macOS it follows the current light or dark appearance; press `T` to choose a daytime Light world, a nighttime Dark world, or return to System. The selection lasts for the current run, and `--no-color` remains the final override for terminal colors.
 
 ## Options
 
