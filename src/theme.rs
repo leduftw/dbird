@@ -115,7 +115,28 @@ fn detect_system_theme() -> ResolvedTheme {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+fn detect_system_theme() -> ResolvedTheme {
+    use std::process::{Command, Stdio};
+
+    let output = Command::new("reg.exe")
+        .args([
+            "query",
+            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
+            "/v",
+            "AppsUseLightTheme",
+        ])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output();
+
+    match output {
+        Ok(output) => theme_from_windows_registry(output.status.success(), &output.stdout),
+        Err(_) => ResolvedTheme::Dark,
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 const fn detect_system_theme() -> ResolvedTheme {
     ResolvedTheme::Dark
 }
@@ -139,6 +160,42 @@ fn theme_from_macos_defaults(
     match std::str::from_utf8(stdout).map(str::trim) {
         Ok(value) if value.eq_ignore_ascii_case("light") => ResolvedTheme::Light,
         Ok(value) if value.eq_ignore_ascii_case("dark") => ResolvedTheme::Dark,
+        _ => ResolvedTheme::Dark,
+    }
+}
+
+#[cfg(any(test, target_os = "windows"))]
+fn theme_from_windows_registry(success: bool, stdout: &[u8]) -> ResolvedTheme {
+    if !success {
+        return ResolvedTheme::Dark;
+    }
+
+    let output = String::from_utf8_lossy(stdout);
+    let value = output.lines().find_map(|line| {
+        let mut fields = line.split_whitespace();
+        let name = fields.next()?;
+        let value_type = fields.next()?;
+        let value = fields.next()?;
+
+        (name.eq_ignore_ascii_case("AppsUseLightTheme")
+            && value_type.eq_ignore_ascii_case("REG_DWORD"))
+        .then_some(value)
+    });
+
+    let Some(value) = value else {
+        return ResolvedTheme::Dark;
+    };
+    let parsed = if let Some(hexadecimal) = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+    {
+        u32::from_str_radix(hexadecimal, 16)
+    } else {
+        value.parse()
+    };
+
+    match parsed {
+        Ok(1) => ResolvedTheme::Light,
         _ => ResolvedTheme::Dark,
     }
 }
@@ -191,6 +248,39 @@ mod tests {
         ] {
             assert_eq!(
                 theme_from_macos_defaults(success, code, output),
+                ResolvedTheme::Dark
+            );
+        }
+    }
+
+    #[test]
+    fn windows_registry_output_distinguishes_day_and_night() {
+        let light = br#"
+HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize
+    AppsUseLightTheme    REG_DWORD    0x1
+"#;
+        let dark = br#"
+HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize
+    AppsUseLightTheme    REG_DWORD    0x0
+"#;
+
+        assert_eq!(
+            theme_from_windows_registry(true, light),
+            ResolvedTheme::Light
+        );
+        assert_eq!(theme_from_windows_registry(true, dark), ResolvedTheme::Dark);
+    }
+
+    #[test]
+    fn ambiguous_windows_theme_detection_safely_keeps_the_dark_palette() {
+        for (success, output) in [
+            (false, b"".as_slice()),
+            (true, b"ERROR: missing value".as_slice()),
+            (true, b"AppsUseLightTheme REG_SZ 0x1".as_slice()),
+            (true, b"AppsUseLightTheme REG_DWORD 0x2".as_slice()),
+        ] {
+            assert_eq!(
+                theme_from_windows_registry(success, output),
                 ResolvedTheme::Dark
             );
         }

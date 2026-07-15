@@ -25,7 +25,7 @@ Pass through each pipe opening to score. Pipe speed, pipe spacing, opening size,
 
 The original Android sound effects accompany flaps, points, collisions, and result transitions. Their separate rights notice is in [`assets/sounds/NOTICE.md`](assets/sounds/NOTICE.md).
 
-The theme starts in System mode on every launch. On macOS it follows the current light or dark appearance; press `T` to choose a daytime Light world, a nighttime Dark world, or return to System. The selection lasts for the current run, and `--no-color` remains the final override for terminal colors.
+The theme starts in System mode on every launch. On macOS and Windows it follows the current light or dark app appearance; press `T` to choose a daytime Light world, a nighttime Dark world, or return to System. The selection lasts for the current run, and `--no-color` remains the final override for terminal colors.
 
 ## Options
 
