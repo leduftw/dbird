@@ -11,9 +11,10 @@ use ratatui::{
 };
 
 use crate::game::{
-    BIRD_ART_HEIGHT, BIRD_ART_OFFSET_X, BIRD_ART_OFFSET_Y, BIRD_ART_WIDTH, GROUND_Y, Game,
-    MAX_FIELD_HEIGHT, MAX_FIELD_WIDTH, MIN_FIELD_HEIGHT, MIN_FIELD_WIDTH, Medal,
-    PIPE_SPEED_PER_TICK, PIPE_WIDTH, Phase, VIRTUAL_HEIGHT, VIRTUAL_WIDTH,
+    BIRD_ART_HEIGHT, BIRD_ART_OFFSET_X, BIRD_ART_OFFSET_Y, BIRD_ART_WIDTH, BIRD_HEIGHT, BIRD_WIDTH,
+    GRAVITY_PER_TICK, GROUND_Y, Game, MAX_FALL_VELOCITY, MAX_FIELD_HEIGHT, MAX_FIELD_WIDTH,
+    MIN_FIELD_HEIGHT, MIN_FIELD_WIDTH, Medal, PIPE_SPEED_PER_TICK, PIPE_WIDTH, Phase,
+    VIRTUAL_HEIGHT, VIRTUAL_WIDTH,
 };
 use crate::theme::{ResolvedTheme, ThemeState};
 
@@ -130,7 +131,7 @@ pub fn draw(frame: &mut Frame<'_>, game: &Game, best: u32, new_best: bool, optio
     draw_interpolated(frame, game, best, new_best, options, 0.0);
 }
 
-/// Draw a game frame with moving scenery sampled between fixed simulation ticks.
+/// Draw a game frame with moving objects sampled between fixed simulation ticks.
 ///
 /// `tick_progress` is the fraction of the upcoming 60 Hz physics step which has
 /// elapsed. It affects presentation only; scoring, collision detection, and all
@@ -435,7 +436,7 @@ fn draw_field(
 
     draw_sky(frame, inner, game.elapsed, options, palette);
     draw_pipes(frame, inner, game, options, palette, tick_progress);
-    draw_bird(frame, inner, game, options, palette);
+    draw_bird(frame, inner, game, options, palette, tick_progress);
     draw_ground(frame, inner, options, palette);
 
     match game.phase {
@@ -591,18 +592,22 @@ fn draw_pipes(
 }
 
 const LEFT_BLOCKS: [&str; 9] = [" ", "▏", "▎", "▍", "▌", "▋", "▊", "▉", "█"];
+const LOWER_BLOCKS: [&str; 9] = [" ", "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
+
+fn normalized_tick_progress(tick_progress: f64) -> f64 {
+    if tick_progress.is_finite() {
+        tick_progress.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
 
 fn visual_pipe_x(pipe_x: f64, phase: Phase, tick_progress: f64) -> f64 {
     if phase != Phase::Playing {
         return pipe_x;
     }
 
-    let progress = if tick_progress.is_finite() {
-        tick_progress.clamp(0.0, 1.0)
-    } else {
-        0.0
-    };
-    pipe_x - PIPE_SPEED_PER_TICK * progress
+    pipe_x - PIPE_SPEED_PER_TICK * normalized_tick_progress(tick_progress)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -816,18 +821,6 @@ enum BirdPose {
 const BIRD_UP_ANGLE_CUTOFF: f64 = -5.0;
 const BIRD_DOWN_ANGLE_CUTOFF: f64 = 30.0;
 
-const UNICODE_BIRD_UP: [[char; 6]; 2] = [
-    [' ', '╭', '─', '●', '↗', '↗'],
-    ['╰', '━', '╯', '╱', ' ', ' '],
-];
-const UNICODE_BIRD_LEVEL: [[char; 6]; 2] = [
-    [' ', '╭', '─', '●', '▶', '▶'],
-    ['╰', '━', '╯', '─', '▶', ' '],
-];
-const UNICODE_BIRD_DOWN: [[char; 6]; 2] = [
-    [' ', '╭', '─', '●', '╲', ' '],
-    ['╰', '━', '╯', '─', '↘', '↘'],
-];
 const ASCII_BIRD_UP: [[char; 6]; 2] = [
     [' ', '.', '-', 'o', '^', '^'],
     ['<', '=', '/', '/', ' ', ' '],
@@ -857,36 +850,114 @@ fn bird_pose_for(phase: Phase, angle: f64) -> BirdPose {
     }
 }
 
-const fn bird_artwork(pose: BirdPose, ascii: bool) -> &'static [[char; 6]; 2] {
-    match (ascii, pose) {
-        (false, BirdPose::Up) => &UNICODE_BIRD_UP,
-        (false, BirdPose::Level) => &UNICODE_BIRD_LEVEL,
-        (false, BirdPose::Down) => &UNICODE_BIRD_DOWN,
-        (true, BirdPose::Up) => &ASCII_BIRD_UP,
-        (true, BirdPose::Level) => &ASCII_BIRD_LEVEL,
-        (true, BirdPose::Down) => &ASCII_BIRD_DOWN,
+const fn ascii_bird_artwork(pose: BirdPose) -> &'static [[char; 6]; 2] {
+    match pose {
+        BirdPose::Up => &ASCII_BIRD_UP,
+        BirdPose::Level => &ASCII_BIRD_LEVEL,
+        BirdPose::Down => &ASCII_BIRD_DOWN,
     }
 }
 
-const fn compact_bird(pose: BirdPose, ascii: bool) -> [(char, Color); 2] {
-    match (ascii, pose) {
-        (false, BirdPose::Up) => [('●', Palette::TEXT), ('↗', Palette::ORANGE)],
-        (false, BirdPose::Level) => [('●', Palette::TEXT), ('▶', Palette::ORANGE)],
-        (false, BirdPose::Down) => [('●', Palette::TEXT), ('↘', Palette::ORANGE)],
-        (true, BirdPose::Up) => [('o', Palette::TEXT), ('^', Palette::ORANGE)],
-        (true, BirdPose::Level) => [('o', Palette::TEXT), ('>', Palette::ORANGE)],
-        (true, BirdPose::Down) => [('o', Palette::TEXT), ('v', Palette::ORANGE)],
+const fn compact_ascii_bird(pose: BirdPose) -> [(char, Color); 2] {
+    match pose {
+        BirdPose::Up => [('o', Palette::TEXT), ('^', Palette::ORANGE)],
+        BirdPose::Level => [('o', Palette::TEXT), ('>', Palette::ORANGE)],
+        BirdPose::Down => [('o', Palette::TEXT), ('v', Palette::ORANGE)],
     }
 }
 
-fn draw_bird(frame: &mut Frame<'_>, area: Rect, game: &Game, options: UiOptions, palette: Palette) {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct BirdGeometry {
+    body_left: i32,
+    body_right: i32,
+    top_eighth: i32,
+    bottom_eighth: i32,
+}
+
+impl BirdGeometry {
+    const fn body_width(self) -> i32 {
+        self.body_right - self.body_left
+    }
+
+    const fn body_height_eighths(self) -> i32 {
+        self.bottom_eighth - self.top_eighth
+    }
+
+    const fn wing_x(self) -> i32 {
+        self.body_left - 1
+    }
+
+    const fn beak_x(self) -> i32 {
+        self.body_right
+    }
+
+    fn detail_y(self) -> i32 {
+        // Keep the face in the upper half, like the original artwork.
+        (self.top_eighth + self.body_height_eighths() / 3).div_euclid(8)
+    }
+}
+
+fn visual_bird_y(game: &Game, tick_progress: f64) -> f64 {
+    if !matches!(game.phase, Phase::Playing | Phase::Dying) {
+        return game.bird_y;
+    }
+
+    let next_velocity = (game.bird_velocity + GRAVITY_PER_TICK).min(MAX_FALL_VELOCITY);
+    let ground_limit = f64::from(GROUND_Y - BIRD_HEIGHT);
+    let next_y = (game.bird_y + next_velocity).trunc().min(ground_limit);
+    let progress = normalized_tick_progress(tick_progress);
+
+    game.bird_y + (next_y - game.bird_y) * progress
+}
+
+fn bird_geometry(game: &Game, visual_y: f64) -> BirdGeometry {
+    let body_left = project_round(game.bird_x, VIRTUAL_WIDTH, game.width);
+    let body_width = project_extent(BIRD_WIDTH, VIRTUAL_WIDTH, game.width).max(2);
+    let top_eighth = (project_exact(visual_y, VIRTUAL_HEIGHT, game.height) * 8.0).round() as i32;
+    let body_height_eighths = (project_exact(f64::from(BIRD_HEIGHT), VIRTUAL_HEIGHT, game.height)
+        * 8.0)
+        .round()
+        .max(8.0) as i32;
+
+    BirdGeometry {
+        body_left,
+        body_right: body_left + body_width,
+        top_eighth,
+        bottom_eighth: top_eighth + body_height_eighths,
+    }
+}
+
+fn draw_bird(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    game: &Game,
+    options: UiOptions,
+    palette: Palette,
+    tick_progress: f64,
+) {
     let pose = bird_pose(game);
+    let visual_y = visual_bird_y(game, tick_progress);
 
+    if options.ascii {
+        draw_ascii_bird(frame, area, game, pose, palette, visual_y);
+    } else {
+        draw_unicode_bird(frame, area, game, pose, palette, visual_y);
+    }
+}
+
+fn draw_ascii_bird(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    game: &Game,
+    pose: BirdPose,
+    palette: Palette,
+    visual_y: f64,
+) {
     // The source atlas stores each bird in a transparent 48x48 frame. Only a
     // 34x24 rectangle is opaque, so rendering the whole frame makes the bird
     // almost as wide as a pipe. These bounds reproduce the actual artwork.
     let visual_left = game.bird_x - f64::from(BIRD_ART_OFFSET_X);
-    let visual_top = game.bird_y - f64::from(BIRD_ART_OFFSET_Y);
+    let visual_top = visual_y - f64::from(BIRD_ART_OFFSET_Y);
     let left = project_round(visual_left, VIRTUAL_WIDTH, game.width);
     let top = project_round(visual_top, VIRTUAL_HEIGHT, game.height);
     let sprite_width = project_extent(BIRD_ART_WIDTH, VIRTUAL_WIDTH, game.width);
@@ -896,7 +967,7 @@ fn draw_bird(frame: &mut Frame<'_>, area: Rect, game: &Game, options: UiOptions,
     let buffer = frame.buffer_mut();
 
     if sprite_height == 1 {
-        let compact = compact_bird(pose, options.ascii);
+        let compact = compact_ascii_bird(pose);
         let compact_width = sprite_width.min(compact.len() as i32);
         let compact_left = left + (sprite_width - compact_width) / 2;
 
@@ -917,7 +988,7 @@ fn draw_bird(frame: &mut Frame<'_>, area: Rect, game: &Game, options: UiOptions,
         return;
     }
 
-    let artwork = bird_artwork(pose, options.ascii);
+    let artwork = ascii_bird_artwork(pose);
     for logical_y in top.max(0)..bottom.min(i32::from(game.height)) {
         let template_y = ((logical_y - top) * artwork.len() as i32 / sprite_height) as usize;
         for logical_x in left.max(0)..right.min(i32::from(game.width)) {
@@ -928,9 +999,9 @@ fn draw_bird(frame: &mut Frame<'_>, area: Rect, game: &Game, options: UiOptions,
                 continue;
             }
 
-            let color = if matches!(symbol, '>' | '▶' | '^' | 'v' | '↗' | '↘') {
+            let color = if matches!(symbol, '>' | '^' | 'v') {
                 Palette::ORANGE
-            } else if matches!(symbol, 'o' | '●') {
+            } else if symbol == 'o' {
                 Palette::TEXT
             } else {
                 Palette::YELLOW
@@ -942,6 +1013,168 @@ fn draw_bird(frame: &mut Frame<'_>, area: Rect, game: &Game, options: UiOptions,
                     .set_style(palette.fg(color).add_modifier(Modifier::BOLD));
             }
         }
+    }
+}
+
+fn draw_unicode_bird(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    game: &Game,
+    pose: BirdPose,
+    palette: Palette,
+    visual_y: f64,
+) {
+    let geometry = bird_geometry(game, visual_y);
+    let buffer = frame.buffer_mut();
+
+    // The filled yellow body is the projected collision box. The tail and beak
+    // are deliberately outside it, so the dangerous edges remain easy to read.
+    for logical_x in geometry.body_left..geometry.body_right {
+        let rounded_edge = geometry.body_width() >= 3
+            && geometry.body_height_eighths() >= 10
+            && matches!(logical_x, x if x == geometry.body_left || x + 1 == geometry.body_right);
+        let edge_inset = i32::from(rounded_edge);
+        draw_vertical_eighth_span(
+            buffer,
+            area,
+            game.height,
+            logical_x,
+            geometry.top_eighth + edge_inset,
+            geometry.bottom_eighth - edge_inset,
+            Palette::YELLOW,
+            palette,
+        );
+    }
+
+    let detail_y = geometry.detail_y();
+    if detail_y < 0 || detail_y >= i32::from(game.height) {
+        return;
+    }
+
+    let wing = match pose {
+        BirdPose::Up => '◥',
+        BirdPose::Level => '◀',
+        BirdPose::Down => '◢',
+    };
+    draw_bird_detail(
+        buffer,
+        area,
+        game.width,
+        geometry.wing_x(),
+        detail_y,
+        wing,
+        palette.fg(Palette::YELLOW).add_modifier(Modifier::BOLD),
+    );
+
+    let eye_x = if geometry.body_width() >= 3 {
+        geometry.body_right - 2
+    } else {
+        geometry.body_right - 1
+    };
+    draw_bird_detail(
+        buffer,
+        area,
+        game.width,
+        eye_x,
+        detail_y,
+        '●',
+        palette
+            .on(Palette::TEXT, Palette::YELLOW)
+            .add_modifier(Modifier::BOLD),
+    );
+    draw_bird_detail(
+        buffer,
+        area,
+        game.width,
+        geometry.beak_x(),
+        detail_y,
+        '▶',
+        palette.fg(Palette::ORANGE).add_modifier(Modifier::BOLD),
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_vertical_eighth_span(
+    buffer: &mut Buffer,
+    area: Rect,
+    field_height: u16,
+    logical_x: i32,
+    top_eighth: i32,
+    bottom_eighth: i32,
+    fill: Color,
+    palette: Palette,
+) {
+    if logical_x < 0 || logical_x >= i32::from(area.width) || bottom_eighth <= top_eighth {
+        return;
+    }
+
+    let first_row = top_eighth.div_euclid(8).max(0);
+    let last_row = ((bottom_eighth + 7).div_euclid(8)).min(i32::from(field_height));
+
+    for logical_y in first_row..last_row {
+        let row_top = logical_y * 8;
+        let start_eighth = (top_eighth - row_top).clamp(0, 8) as usize;
+        let end_eighth = (bottom_eighth - row_top).clamp(0, 8) as usize;
+        if end_eighth <= start_eighth {
+            continue;
+        }
+
+        let sky = if logical_y % 2 == 0 {
+            Palette::SKY_A
+        } else {
+            Palette::SKY_B
+        };
+        let (symbol, mut style) = if start_eighth == 0 && end_eighth == 8 {
+            ("█", palette.fg(fill))
+        } else if end_eighth == 8 {
+            (LOWER_BLOCKS[8 - start_eighth], palette.on(fill, sky))
+        } else if start_eighth == 0 {
+            let style = if palette.color {
+                palette.on(sky, fill)
+            } else {
+                Style::default().add_modifier(Modifier::REVERSED)
+            };
+            (LOWER_BLOCKS[8 - end_eighth], style)
+        } else {
+            // Bird spans are at least one row high, so this is only a defensive
+            // fallback after extreme viewport clipping.
+            (
+                LOWER_BLOCKS[end_eighth - start_eighth],
+                palette.on(fill, sky),
+            )
+        };
+        style = style.add_modifier(Modifier::BOLD);
+
+        let x = area.x.saturating_add(logical_x as u16);
+        let y = area.y.saturating_add(logical_y as u16);
+        if let Some(cell) = buffer.cell_mut((x, y)) {
+            cell.set_symbol(symbol).set_style(style);
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_bird_detail(
+    buffer: &mut Buffer,
+    area: Rect,
+    field_width: u16,
+    logical_x: i32,
+    logical_y: i32,
+    symbol: char,
+    style: Style,
+) {
+    if logical_x < 0
+        || logical_x >= i32::from(field_width)
+        || logical_y < 0
+        || logical_y >= i32::from(area.height)
+    {
+        return;
+    }
+
+    let x = area.x.saturating_add(logical_x as u16);
+    let y = area.y.saturating_add(logical_y as u16);
+    if let Some(cell) = buffer.cell_mut((x, y)) {
+        cell.set_char(symbol).set_style(style);
     }
 }
 
@@ -1344,28 +1577,43 @@ mod tests {
                     &game,
                     options,
                     Palette::new(true, ResolvedTheme::Dark),
+                    0.0,
                 );
             })
             .expect("draw bird");
 
-        let left = project_round(
-            game.bird_x - f64::from(BIRD_ART_OFFSET_X),
-            VIRTUAL_WIDTH,
-            width,
-        ) as u16;
-        let top = project_round(
-            game.bird_y - f64::from(BIRD_ART_OFFSET_Y),
-            VIRTUAL_HEIGHT,
-            height,
-        ) as u16;
-        let sprite_width = project_extent(BIRD_ART_WIDTH, VIRTUAL_WIDTH, width) as u16;
-        let sprite_height = project_extent(BIRD_ART_HEIGHT, VIRTUAL_HEIGHT, height) as u16;
+        let (left, top, right, bottom) = if ascii {
+            let left = project_round(
+                game.bird_x - f64::from(BIRD_ART_OFFSET_X),
+                VIRTUAL_WIDTH,
+                width,
+            );
+            let top = project_round(
+                game.bird_y - f64::from(BIRD_ART_OFFSET_Y),
+                VIRTUAL_HEIGHT,
+                height,
+            );
+            (
+                left,
+                top,
+                left + project_extent(BIRD_ART_WIDTH, VIRTUAL_WIDTH, width),
+                top + project_extent(BIRD_ART_HEIGHT, VIRTUAL_HEIGHT, height),
+            )
+        } else {
+            let geometry = bird_geometry(&game, game.bird_y);
+            (
+                geometry.wing_x(),
+                geometry.top_eighth.div_euclid(8),
+                geometry.beak_x() + 1,
+                (geometry.bottom_eighth + 7).div_euclid(8),
+            )
+        };
         let buffer = terminal.backend().buffer();
 
-        (top..top + sprite_height)
+        (top..bottom)
             .map(|y| {
-                (left..left + sprite_width)
-                    .map(|x| buffer[(x, y)].symbol())
+                (left..right)
+                    .map(|x| buffer[(x as u16, y as u16)].symbol())
                     .collect::<String>()
             })
             .collect()
@@ -1455,6 +1703,13 @@ mod tests {
                 project_extent(BIRD_ART_HEIGHT, VIRTUAL_HEIGHT, game.height),
                 2
             );
+
+            let geometry = bird_geometry(&game, game.bird_y);
+            assert_eq!(geometry.body_left, 13);
+            assert_eq!(geometry.body_right, 16);
+            assert_eq!(geometry.body_height_eighths(), 13);
+            assert_eq!(geometry.wing_x(), 12);
+            assert_eq!(geometry.beak_x(), 16);
         }
     }
 
@@ -1462,15 +1717,15 @@ mod tests {
     fn full_size_bird_has_distinct_up_level_and_down_silhouettes() {
         assert_eq!(
             isolated_bird_rows(BirdPose::Up, false, MAX_FIELD_WIDTH, MAX_FIELD_HEIGHT),
-            [" ╭─●↗", "╰━╯╱ "]
+            ["◥▅●▅▶", " ▂▁▂ "]
         );
         assert_eq!(
             isolated_bird_rows(BirdPose::Level, false, MAX_FIELD_WIDTH, MAX_FIELD_HEIGHT),
-            [" ╭─●▶", "╰━╯─▶"]
+            ["◀▅●▅▶", " ▂▁▂ "]
         );
         assert_eq!(
             isolated_bird_rows(BirdPose::Down, false, MAX_FIELD_WIDTH, MAX_FIELD_HEIGHT),
-            [" ╭─●╲", "╰━╯─↘"]
+            ["◢▅●▅▶", " ▂▁▂ "]
         );
 
         assert_eq!(
@@ -1488,13 +1743,13 @@ mod tests {
     }
 
     #[test]
-    fn compact_bird_still_shows_each_rotation() {
+    fn small_bird_still_has_a_filled_body_and_shows_each_rotation() {
         for (pose, unicode, ascii) in [
-            (BirdPose::Up, "●↗", "o^"),
-            (BirdPose::Level, "●▶", "o>"),
-            (BirdPose::Down, "●↘", "ov"),
+            (BirdPose::Up, ["◥▃●▶", " ▃▃ "], "o^"),
+            (BirdPose::Level, ["◀▃●▶", " ▃▃ "], "o>"),
+            (BirdPose::Down, ["◢▃●▶", " ▃▃ "], "ov"),
         ] {
-            assert_eq!(isolated_bird_rows(pose, false, 20, 18), [unicode]);
+            assert_eq!(isolated_bird_rows(pose, false, 20, 18), unicode);
             assert_eq!(isolated_bird_rows(pose, true, 20, 18), [ascii]);
         }
 
@@ -1710,7 +1965,7 @@ mod tests {
     }
 
     #[test]
-    fn portrait_field_projects_narrow_pipes_and_the_opaque_bird_art() {
+    fn portrait_field_projects_narrow_pipes_and_a_readable_bird_body() {
         let width = 20;
         let height = 18;
 
@@ -1731,6 +1986,12 @@ mod tests {
                 < project_ceil(180.0, VIRTUAL_HEIGHT, height)
                     - project_floor(84.0, VIRTUAL_HEIGHT, height)
         );
+
+        let mut compact_game = Game::new(width, height, 7);
+        compact_game.bird_y = 246.0;
+        let compact_geometry = bird_geometry(&compact_game, compact_game.bird_y);
+        assert_eq!(compact_geometry.body_width(), 2);
+        assert_eq!(compact_geometry.body_height_eighths(), 8);
 
         assert_eq!(
             project_extent(BIRD_ART_WIDTH, VIRTUAL_WIDTH, MAX_FIELD_WIDTH),
@@ -1785,8 +2046,126 @@ mod tests {
             })
             .collect();
         assert_eq!(pipe_cells, vec![(21, "▎"), (22, "█"), (23, "▊"), (24, "▊")]);
-        assert_eq!(buffer[(13, 13)].symbol(), "●");
-        assert_eq!(buffer[(14, 13)].symbol(), "▶");
+        assert_eq!(buffer[(13, 12)].symbol(), "◀");
+        assert_eq!(buffer[(14, 12)].symbol(), "▃");
+        assert_eq!(buffer[(15, 12)].symbol(), "●");
+        assert_eq!(buffer[(16, 12)].symbol(), "▶");
+        assert_eq!(buffer[(14, 13)].symbol(), "▃");
+        assert_eq!(buffer[(15, 13)].symbol(), "▃");
+    }
+
+    #[test]
+    fn bird_body_advances_between_fixed_physics_ticks() {
+        let mut game = Game::new(MAX_FIELD_WIDTH, MAX_FIELD_HEIGHT, 7);
+        assert!(game.start());
+        game.bird_y = 246.0;
+        game.bird_velocity = MAX_FALL_VELOCITY;
+        let options = test_options(false, ThemeMode::Dark);
+        let palette = Palette::new(true, ResolvedTheme::Dark);
+
+        let render = |tick_progress| {
+            let backend = TestBackend::new(game.width, game.height);
+            let mut terminal = Terminal::new(backend).expect("test terminal");
+            terminal
+                .draw(|frame| {
+                    let area = Rect::new(0, 0, game.width, game.height);
+                    draw_sky(frame, area, game.elapsed, options, palette);
+                    draw_bird(frame, area, &game, options, palette, tick_progress);
+                })
+                .expect("draw interpolated bird");
+            terminal.backend().buffer()[(13, 19)].clone()
+        };
+
+        let at_tick = render(0.0);
+        let halfway = render(0.5);
+        assert_eq!(at_tick.symbol(), "▅");
+        assert_eq!(halfway.symbol(), "▃");
+        assert_ne!(at_tick, halfway);
+        assert_eq!(game.bird_y, 246.0, "rendering must not alter physics");
+
+        assert_eq!(visual_bird_y(&game, 0.5), 250.0);
+        assert_eq!(visual_bird_y(&game, 1.0), 254.0);
+        assert_eq!(visual_bird_y(&game, f64::NAN), 246.0);
+
+        let mut paused = game.clone();
+        paused.phase = Phase::Paused;
+        assert_eq!(visual_bird_y(&paused, 0.5), 246.0);
+
+        let mut dying = game.clone();
+        dying.phase = Phase::Dying;
+        assert_eq!(visual_bird_y(&dying, 0.5), 250.0);
+    }
+
+    #[test]
+    fn bird_body_keeps_constant_eighth_height_in_color_and_monochrome() {
+        let mut game = Game::new(MAX_FIELD_WIDTH, MAX_FIELD_HEIGHT, 7);
+        assert!(game.start());
+        game.bird_y = 246.0;
+        game.bird_velocity = MAX_FALL_VELOCITY;
+
+        let render = |color, tick_progress| {
+            let options = UiOptions {
+                ascii: false,
+                color,
+                theme: ThemeState::explicit(ThemeMode::Dark),
+            };
+            let palette = Palette::new(color, ResolvedTheme::Dark);
+            let backend = TestBackend::new(game.width, game.height);
+            let mut terminal = Terminal::new(backend).expect("test terminal");
+            terminal
+                .draw(|frame| {
+                    let area = Rect::new(0, 0, game.width, game.height);
+                    draw_sky(frame, area, game.elapsed, options, palette);
+                    draw_bird(frame, area, &game, options, palette, tick_progress);
+                })
+                .expect("draw bird body");
+            terminal.backend().buffer().clone()
+        };
+
+        for tick_progress in [0.0, 0.25, 0.5, 0.75, 1.0] {
+            let colored = render(true, tick_progress);
+            let monochrome = render(false, tick_progress);
+            let colored_symbols: Vec<&str> =
+                colored.content().iter().map(|cell| cell.symbol()).collect();
+            let monochrome_symbols: Vec<&str> = monochrome
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect();
+            assert_eq!(colored_symbols, monochrome_symbols);
+
+            let geometry = bird_geometry(&game, visual_bird_y(&game, tick_progress));
+            assert_eq!(geometry.body_height_eighths(), 13);
+            let outer_body_eighths = (0..game.height)
+                .map(|y| {
+                    let cell = &colored[(geometry.body_left as u16, y)];
+                    let block_eighths = LOWER_BLOCKS
+                        .iter()
+                        .position(|symbol| *symbol == cell.symbol())
+                        .unwrap_or(0);
+                    if cell.fg == Palette::YELLOW {
+                        block_eighths
+                    } else if cell.bg == Palette::YELLOW {
+                        8 - block_eighths
+                    } else {
+                        0
+                    }
+                })
+                .sum::<usize>();
+            assert_eq!(
+                outer_body_eighths, 11,
+                "body height pulsed at tick progress {tick_progress}"
+            );
+        }
+
+        assert!(monochrome_top_edge_is_reversed(
+            &render(false, 0.0),
+            (13, 20)
+        ));
+    }
+
+    fn monochrome_top_edge_is_reversed(buffer: &Buffer, position: (u16, u16)) -> bool {
+        buffer[position].modifier.contains(Modifier::REVERSED)
     }
 
     #[test]
