@@ -6,10 +6,14 @@ A fully playable terminal recreation of the classic Flappy Bird game.
 
 ### Requirements
 
-- [Rust](https://www.rust-lang.org/tools/install) 1.88 or newer
+- [Rust](https://www.rust-lang.org/tools/install) 1.88 or newer — only for building from source
 - An interactive terminal
 
 The minimum terminal size is 36 columns by 20 rows. A window at least 36 rows tall is recommended for the fuller portrait view.
+
+### Download a prebuilt binary
+
+Every release ships executables for macOS (Apple Silicon and Intel), Linux (x86_64 and arm64), and Windows (x86_64). Grab the archive for your platform from the [latest release](https://github.com/leduftw/dbird/releases/latest), extract it, and run `dbird` from a terminal — no Rust toolchain required. On Linux, audio uses ALSA (`libasound2`), which desktop distributions ship by default. If macOS Gatekeeper blocks a browser-downloaded binary, clear the quarantine flag with `xattr -d com.apple.quarantine dbird`.
 
 ### Run from source
 
