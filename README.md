@@ -2,14 +2,33 @@
 
 A fully playable terminal recreation of the classic Flappy Bird game.
 
-## Play
+## Quick start
 
-You need Rust 1.88 or newer and an interactive terminal. The minimum window is 36x20; a window at least 36 rows tall is recommended for the fuller portrait view.
+### Requirements
+
+- [Rust](https://www.rust-lang.org/tools/install) 1.88 or newer
+- An interactive terminal
+
+The minimum terminal size is 36 columns by 20 rows. A window at least 36 rows tall is recommended for the fuller portrait view.
+
+### Run from source
 
 ```sh
-cd ~/Developer/dbird
+git clone https://github.com/leduftw/dbird.git
+cd dbird
 cargo run --release
 ```
+
+### Install
+
+Install the latest version directly from GitHub to make `dbird` available on your shell path:
+
+```sh
+cargo install --locked --git https://github.com/leduftw/dbird.git
+dbird
+```
+
+## Play
 
 ### Controls
 
@@ -47,16 +66,9 @@ High scores are stored outside the repository. On macOS the default is:
 
 `$XDG_STATE_HOME` takes precedence when it is set. A missing or malformed score file never prevents the game from starting.
 
-## Install locally
-
-To make `dbird` available on your shell path:
-
-```sh
-cargo install --path .
-dbird
-```
-
 ## Develop
+
+After cloning the repository, run the complete local check suite with:
 
 ```sh
 cargo fmt --check
