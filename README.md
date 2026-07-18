@@ -77,3 +77,7 @@ cargo test
 ```
 
 The physics and seeded pipe generation are independent from terminal rendering, so gameplay behavior can be tested without driving an interactive terminal.
+
+## License
+
+dbird is released under the [MIT License](LICENSE). The bundled sound effects are original works covered by the same terms; see [`assets/sounds/NOTICE.md`](assets/sounds/NOTICE.md).
