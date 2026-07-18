@@ -285,11 +285,27 @@ impl Palette {
         }
     }
 
+    fn fixed_fg(self, color: Color) -> Style {
+        if self.color {
+            Style::default().fg(color)
+        } else {
+            Style::default()
+        }
+    }
+
     fn on(self, foreground: Color, background: Color) -> Style {
         if self.color {
             Style::default()
                 .fg(self.resolve(foreground))
                 .bg(self.resolve(background))
+        } else {
+            Style::default()
+        }
+    }
+
+    fn fixed_on(self, foreground: Color, background: Color) -> Style {
+        if self.color {
+            Style::default().fg(foreground).bg(background)
         } else {
             Style::default()
         }
@@ -883,7 +899,7 @@ impl BirdGeometry {
         self.bottom_eighth - self.top_eighth
     }
 
-    const fn wing_x(self) -> i32 {
+    const fn tail_x(self) -> i32 {
         self.body_left - 1
     }
 
@@ -891,9 +907,56 @@ impl BirdGeometry {
         self.body_right
     }
 
-    fn detail_y(self) -> i32 {
-        // Keep the face in the upper half, like the original artwork.
-        (self.top_eighth + self.body_height_eighths() / 3).div_euclid(8)
+    const fn eye_x(self) -> i32 {
+        self.body_right - 1
+    }
+
+    fn column_tilt_eighths(self, pose: BirdPose, logical_x: i32) -> i32 {
+        debug_assert!(logical_x >= self.body_left && logical_x < self.body_right);
+
+        let column = logical_x - self.body_left;
+        // Terminal rows are roughly twice as tall as columns are wide. Moving
+        // each adjacent body column by half a row therefore produces an
+        // approximately 45-degree physical slope.
+        let nose_up_offset = (self.body_width() - 1 - 2 * column) * 2;
+        match pose {
+            BirdPose::Up => nose_up_offset,
+            BirdPose::Level => 0,
+            BirdPose::Down => -nose_up_offset,
+        }
+    }
+
+    fn column_top_eighth(self, pose: BirdPose, logical_x: i32) -> i32 {
+        self.top_eighth + self.column_tilt_eighths(pose, logical_x)
+    }
+
+    fn column_bottom_eighth(self, pose: BirdPose, logical_x: i32) -> i32 {
+        self.bottom_eighth + self.column_tilt_eighths(pose, logical_x)
+    }
+
+    fn detail_eighth(self, pose: BirdPose, logical_x: i32) -> i32 {
+        // Every detail uses the same local anchor inside its body column.
+        self.column_top_eighth(pose, logical_x) + self.body_height_eighths() * 3 / 8
+    }
+
+    fn detail_y(self, pose: BirdPose, logical_x: i32) -> i32 {
+        self.detail_eighth(pose, logical_x).div_euclid(8)
+    }
+
+    #[cfg(test)]
+    fn silhouette_top_eighth(self, pose: BirdPose) -> i32 {
+        (self.body_left..self.body_right)
+            .map(|logical_x| self.column_top_eighth(pose, logical_x))
+            .min()
+            .unwrap_or(self.top_eighth)
+    }
+
+    #[cfg(test)]
+    fn silhouette_bottom_eighth(self, pose: BirdPose) -> i32 {
+        (self.body_left..self.body_right)
+            .map(|logical_x| self.column_bottom_eighth(pose, logical_x))
+            .max()
+            .unwrap_or(self.bottom_eighth)
     }
 }
 
@@ -913,11 +976,14 @@ fn visual_bird_y(game: &Game, tick_progress: f64) -> f64 {
 fn bird_geometry(game: &Game, visual_y: f64) -> BirdGeometry {
     let body_left = project_round(game.bird_x, VIRTUAL_WIDTH, game.width);
     let body_width = project_extent(BIRD_WIDTH, VIRTUAL_WIDTH, game.width).max(2);
-    let top_eighth = (project_exact(visual_y, VIRTUAL_HEIGHT, game.height) * 8.0).round() as i32;
-    let body_height_eighths = (project_exact(f64::from(BIRD_HEIGHT), VIRTUAL_HEIGHT, game.height)
-        * 8.0)
-        .round()
-        .max(8.0) as i32;
+    let body_height_eighths = project_extent(BIRD_ART_HEIGHT, VIRTUAL_HEIGHT, game.height) * 8;
+    let center_eighth = (project_exact(
+        visual_y + f64::from(BIRD_HEIGHT) / 2.0,
+        VIRTUAL_HEIGHT,
+        game.height,
+    ) * 8.0)
+        .round() as i32;
+    let top_eighth = center_eighth - body_height_eighths / 2;
 
     BirdGeometry {
         body_left,
@@ -980,8 +1046,13 @@ fn draw_ascii_bird(
                 let x = area.x.saturating_add(logical_x as u16);
                 let y = area.y.saturating_add(top as u16);
                 if let Some(cell) = buffer.cell_mut((x, y)) {
+                    let style = if symbol == 'o' {
+                        palette.fg(color)
+                    } else {
+                        palette.fixed_fg(color)
+                    };
                     cell.set_char(symbol)
-                        .set_style(palette.fg(color).add_modifier(Modifier::BOLD));
+                        .set_style(style.add_modifier(Modifier::BOLD));
                 }
             }
         }
@@ -1009,8 +1080,13 @@ fn draw_ascii_bird(
             let x = area.x.saturating_add(logical_x as u16);
             let y = area.y.saturating_add(logical_y as u16);
             if let Some(cell) = buffer.cell_mut((x, y)) {
+                let style = if symbol == 'o' {
+                    palette.fg(color)
+                } else {
+                    palette.fixed_fg(color)
+                };
                 cell.set_char(symbol)
-                    .set_style(palette.fg(color).add_modifier(Modifier::BOLD));
+                    .set_style(style.add_modifier(Modifier::BOLD));
             }
         }
     }
@@ -1027,8 +1103,8 @@ fn draw_unicode_bird(
     let geometry = bird_geometry(game, visual_y);
     let buffer = frame.buffer_mut();
 
-    // The filled yellow body is the projected collision box. The tail and beak
-    // are deliberately outside it, so the dangerous edges remain easy to read.
+    // The solid body stays centered on the collision box. Tail and beak are
+    // decorative, while every body column shares one pose-aware tilt model.
     for logical_x in geometry.body_left..geometry.body_right {
         let rounded_edge = geometry.body_width() >= 3
             && geometry.body_height_eighths() >= 10
@@ -1039,47 +1115,37 @@ fn draw_unicode_bird(
             area,
             game.height,
             logical_x,
-            geometry.top_eighth + edge_inset,
-            geometry.bottom_eighth - edge_inset,
+            geometry.column_top_eighth(pose, logical_x) + edge_inset,
+            geometry.column_bottom_eighth(pose, logical_x) - edge_inset,
             Palette::YELLOW,
             palette,
         );
     }
 
-    let detail_y = geometry.detail_y();
-    if detail_y < 0 || detail_y >= i32::from(game.height) {
-        return;
-    }
-
-    let wing = match pose {
-        BirdPose::Up => '◥',
-        BirdPose::Level => '◀',
-        BirdPose::Down => '◢',
-    };
+    let tail_y = geometry.detail_y(pose, geometry.body_left);
     draw_bird_detail(
         buffer,
         area,
         game.width,
-        geometry.wing_x(),
-        detail_y,
-        wing,
-        palette.fg(Palette::YELLOW).add_modifier(Modifier::BOLD),
+        geometry.tail_x(),
+        tail_y,
+        '◀',
+        palette
+            .fixed_fg(Palette::YELLOW)
+            .add_modifier(Modifier::BOLD),
     );
 
-    let eye_x = if geometry.body_width() >= 3 {
-        geometry.body_right - 2
-    } else {
-        geometry.body_right - 1
-    };
+    let eye_x = geometry.eye_x();
+    let face_y = geometry.detail_y(pose, eye_x);
     draw_bird_detail(
         buffer,
         area,
         game.width,
         eye_x,
-        detail_y,
+        face_y,
         '●',
         palette
-            .on(Palette::TEXT, Palette::YELLOW)
+            .fixed_on(Palette::TEXT, Palette::YELLOW)
             .add_modifier(Modifier::BOLD),
     );
     draw_bird_detail(
@@ -1087,9 +1153,11 @@ fn draw_unicode_bird(
         area,
         game.width,
         geometry.beak_x(),
-        detail_y,
+        face_y,
         '▶',
-        palette.fg(Palette::ORANGE).add_modifier(Modifier::BOLD),
+        palette
+            .fixed_fg(Palette::ORANGE)
+            .add_modifier(Modifier::BOLD),
     );
 }
 
@@ -1125,12 +1193,15 @@ fn draw_vertical_eighth_span(
             Palette::SKY_B
         };
         let (symbol, mut style) = if start_eighth == 0 && end_eighth == 8 {
-            ("█", palette.fg(fill))
+            ("█", palette.fixed_fg(fill))
         } else if end_eighth == 8 {
-            (LOWER_BLOCKS[8 - start_eighth], palette.on(fill, sky))
+            (
+                LOWER_BLOCKS[8 - start_eighth],
+                palette.fixed_on(fill, palette.resolve(sky)),
+            )
         } else if start_eighth == 0 {
             let style = if palette.color {
-                palette.on(sky, fill)
+                palette.fixed_on(palette.resolve(sky), fill)
             } else {
                 Style::default().add_modifier(Modifier::REVERSED)
             };
@@ -1140,7 +1211,7 @@ fn draw_vertical_eighth_span(
             // fallback after extreme viewport clipping.
             (
                 LOWER_BLOCKS[end_eighth - start_eighth],
-                palette.on(fill, sky),
+                palette.fixed_on(fill, palette.resolve(sky)),
             )
         };
         style = style.add_modifier(Modifier::BOLD);
@@ -1602,10 +1673,10 @@ mod tests {
         } else {
             let geometry = bird_geometry(&game, game.bird_y);
             (
-                geometry.wing_x(),
-                geometry.top_eighth.div_euclid(8),
+                geometry.tail_x(),
+                geometry.silhouette_top_eighth(pose).div_euclid(8),
                 geometry.beak_x() + 1,
-                (geometry.bottom_eighth + 7).div_euclid(8),
+                (geometry.silhouette_bottom_eighth(pose) + 7).div_euclid(8),
             )
         };
         let buffer = terminal.backend().buffer();
@@ -1707,8 +1778,8 @@ mod tests {
             let geometry = bird_geometry(&game, game.bird_y);
             assert_eq!(geometry.body_left, 13);
             assert_eq!(geometry.body_right, 16);
-            assert_eq!(geometry.body_height_eighths(), 13);
-            assert_eq!(geometry.wing_x(), 12);
+            assert_eq!(geometry.body_height_eighths(), 16);
+            assert_eq!(geometry.tail_x(), 12);
             assert_eq!(geometry.beak_x(), 16);
         }
     }
@@ -1717,15 +1788,15 @@ mod tests {
     fn full_size_bird_has_distinct_up_level_and_down_silhouettes() {
         assert_eq!(
             isolated_bird_rows(BirdPose::Up, false, MAX_FIELD_WIDTH, MAX_FIELD_HEIGHT),
-            ["◥▅●▅▶", " ▂▁▂ "]
+            ["   ▃ ", " ▃█●▶", "◀██▅ ", " ▅   "]
         );
         assert_eq!(
             isolated_bird_rows(BirdPose::Level, false, MAX_FIELD_WIDTH, MAX_FIELD_HEIGHT),
-            ["◀▅●▅▶", " ▂▁▂ "]
+            ["◀▇█●▶", " ▁█▁ "]
         );
         assert_eq!(
             isolated_bird_rows(BirdPose::Down, false, MAX_FIELD_WIDTH, MAX_FIELD_HEIGHT),
-            ["◢▅●▅▶", " ▂▁▂ "]
+            [" ▃   ", "◀██▃ ", " ▅█●▶", "   ▅ "]
         );
 
         assert_eq!(
@@ -1743,11 +1814,71 @@ mod tests {
     }
 
     #[test]
+    fn tilted_body_and_eye_share_one_pose_geometry() {
+        let expected_column_tops = [
+            (BirdPose::Up, [156, 152, 148]),
+            (BirdPose::Level, [152, 152, 152]),
+            (BirdPose::Down, [148, 152, 156]),
+        ];
+
+        for (pose, expected_tops) in expected_column_tops {
+            let game = game_with_pose(pose, MAX_FIELD_WIDTH, MAX_FIELD_HEIGHT);
+            let geometry = bird_geometry(&game, game.bird_y);
+            let actual_tops = [
+                geometry.column_top_eighth(pose, geometry.body_left),
+                geometry.column_top_eighth(pose, geometry.body_left + 1),
+                geometry.column_top_eighth(pose, geometry.body_left + 2),
+            ];
+            assert_eq!(actual_tops, expected_tops);
+
+            let eye_x = geometry.eye_x();
+            assert_eq!(
+                geometry.detail_eighth(pose, eye_x) - geometry.column_top_eighth(pose, eye_x),
+                6,
+                "eye moved within the {pose:?} body"
+            );
+
+            let backend = TestBackend::new(game.width, game.height);
+            let mut terminal = Terminal::new(backend).expect("test terminal");
+            terminal
+                .draw(|frame| {
+                    draw_bird(
+                        frame,
+                        Rect::new(0, 0, game.width, game.height),
+                        &game,
+                        test_options(false, ThemeMode::Dark),
+                        Palette::new(true, ResolvedTheme::Dark),
+                        0.0,
+                    );
+                })
+                .expect("draw tilted bird");
+            assert_eq!(
+                terminal.backend().buffer()[(eye_x as u16, geometry.detail_y(pose, eye_x) as u16)]
+                    .symbol(),
+                "●"
+            );
+        }
+
+        let mut moving = game_with_pose(BirdPose::Level, MAX_FIELD_WIDTH, MAX_FIELD_HEIGHT);
+        moving.bird_velocity = MAX_FALL_VELOCITY;
+        for tick_progress in [0.0, 0.25, 0.5, 0.75, 1.0] {
+            let geometry = bird_geometry(&moving, visual_bird_y(&moving, tick_progress));
+            let eye_x = geometry.eye_x();
+            assert_eq!(
+                geometry.detail_eighth(BirdPose::Level, eye_x)
+                    - geometry.column_top_eighth(BirdPose::Level, eye_x),
+                6,
+                "eye drifted at tick progress {tick_progress}"
+            );
+        }
+    }
+
+    #[test]
     fn small_bird_still_has_a_filled_body_and_shows_each_rotation() {
         for (pose, unicode, ascii) in [
-            (BirdPose::Up, ["◥▃●▶", " ▃▃ "], "o^"),
-            (BirdPose::Level, ["◀▃●▶", " ▃▃ "], "o>"),
-            (BirdPose::Down, ["◢▃●▶", " ▃▃ "], "ov"),
+            (BirdPose::Up, vec![" ▂●▶", "◀▂▆ "], "o^"),
+            (BirdPose::Level, vec!["◀▄●▶", " ▄▄ "], "o>"),
+            (BirdPose::Down, vec!["◀▆▂ ", " ▆●▶"], "ov"),
         ] {
             assert_eq!(isolated_bird_rows(pose, false, 20, 18), unicode);
             assert_eq!(isolated_bird_rows(pose, true, 20, 18), [ascii]);
@@ -1806,6 +1937,46 @@ mod tests {
             assert_eq!(palette.panel(), Style::default());
             assert_eq!(palette.fg(Palette::TEXT), Style::default());
         }
+    }
+
+    #[test]
+    fn bird_colors_do_not_change_between_day_and_night() {
+        let game = game_with_pose(BirdPose::Level, MAX_FIELD_WIDTH, MAX_FIELD_HEIGHT);
+
+        let render = |mode, resolved| {
+            let options = test_options(false, mode);
+            let palette = Palette::new(true, resolved);
+            let backend = TestBackend::new(game.width, game.height);
+            let mut terminal = Terminal::new(backend).expect("test terminal");
+            terminal
+                .draw(|frame| {
+                    let area = Rect::new(0, 0, game.width, game.height);
+                    draw_sky(frame, area, game.elapsed, options, palette);
+                    draw_bird(frame, area, &game, options, palette, 0.0);
+                })
+                .expect("draw themed bird");
+            terminal.backend().buffer().clone()
+        };
+
+        let dark = render(ThemeMode::Dark, ResolvedTheme::Dark);
+        let light = render(ThemeMode::Light, ResolvedTheme::Light);
+        let bird_cells = [(12, 19), (14, 19), (15, 19), (16, 19)];
+
+        for position in bird_cells {
+            assert_eq!(
+                light[position].fg, dark[position].fg,
+                "bird color changed at {position:?}"
+            );
+        }
+        assert_eq!(light[(14, 19)].fg, Palette::YELLOW);
+        assert_eq!(light[(15, 19)].fg, Palette::TEXT);
+        assert_eq!(light[(15, 19)].bg, Palette::YELLOW);
+        assert_eq!(light[(16, 19)].fg, Palette::ORANGE);
+        assert_eq!(
+            Palette::new(true, ResolvedTheme::Light).resolve(Palette::YELLOW),
+            Palette::LIGHT_YELLOW,
+            "only the bird should bypass the general light-theme text color"
+        );
     }
 
     #[test]
@@ -2047,11 +2218,11 @@ mod tests {
             .collect();
         assert_eq!(pipe_cells, vec![(21, "▎"), (22, "█"), (23, "▊"), (24, "▊")]);
         assert_eq!(buffer[(13, 12)].symbol(), "◀");
-        assert_eq!(buffer[(14, 12)].symbol(), "▃");
+        assert_eq!(buffer[(14, 12)].symbol(), "▄");
         assert_eq!(buffer[(15, 12)].symbol(), "●");
         assert_eq!(buffer[(16, 12)].symbol(), "▶");
-        assert_eq!(buffer[(14, 13)].symbol(), "▃");
-        assert_eq!(buffer[(15, 13)].symbol(), "▃");
+        assert_eq!(buffer[(14, 13)].symbol(), "▄");
+        assert_eq!(buffer[(15, 13)].symbol(), "▄");
     }
 
     #[test]
@@ -2078,8 +2249,8 @@ mod tests {
 
         let at_tick = render(0.0);
         let halfway = render(0.5);
-        assert_eq!(at_tick.symbol(), "▅");
-        assert_eq!(halfway.symbol(), "▃");
+        assert_eq!(at_tick.symbol(), "▇");
+        assert_eq!(halfway.symbol(), "▄");
         assert_ne!(at_tick, halfway);
         assert_eq!(game.bird_y, 246.0, "rendering must not alter physics");
 
@@ -2135,7 +2306,7 @@ mod tests {
             assert_eq!(colored_symbols, monochrome_symbols);
 
             let geometry = bird_geometry(&game, visual_bird_y(&game, tick_progress));
-            assert_eq!(geometry.body_height_eighths(), 13);
+            assert_eq!(geometry.body_height_eighths(), 16);
             let outer_body_eighths = (0..game.height)
                 .map(|y| {
                     let cell = &colored[(geometry.body_left as u16, y)];
@@ -2153,7 +2324,7 @@ mod tests {
                 })
                 .sum::<usize>();
             assert_eq!(
-                outer_body_eighths, 11,
+                outer_body_eighths, 14,
                 "body height pulsed at tick progress {tick_progress}"
             );
         }
