@@ -42,7 +42,7 @@ dbird
 
 Pass through each pipe opening to score. Pipe speed, pipe spacing, opening size, and flight physics stay fixed for the entire run, just like the original game. Scores of 10, 20, 30, and 40 award Bronze, Silver, Gold, and Platinum medals respectively. If the terminal becomes too small, the round is safely suspended; enlarge it and resume when ready.
 
-The original Android sound effects accompany flaps, points, collisions, and result transitions. Their separate rights notice is in [`assets/sounds/NOTICE.md`](assets/sounds/NOTICE.md).
+Retro-style sound effects accompany flaps, points, collisions, and result transitions. They were synthesized from scratch for dbird by [`assets/sounds/generate.py`](assets/sounds/generate.py); provenance details are in [`assets/sounds/NOTICE.md`](assets/sounds/NOTICE.md).
 
 The theme starts in System mode on every launch. On macOS and Windows it follows the current light or dark app appearance; press `T` to choose a daytime Light world, a nighttime Dark world, or return to System. The selection lasts for the current run, and `--no-color` remains the final override for terminal colors.
 
