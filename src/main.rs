@@ -15,8 +15,9 @@ use dbird::theme::ThemeState;
 use dbird::ui::{self, UiOptions};
 use ratatui::layout::Rect;
 
+// Preserve the original 60 Hz mechanics while sampling motion at 120 Hz.
 const PHYSICS_STEP: Duration = Duration::from_nanos(16_666_667);
-const FRAME_TIME: Duration = Duration::from_nanos(16_666_667);
+const RENDER_FRAME_TIME: Duration = Duration::from_nanos(8_333_333);
 const MAX_FRAME_DELTA: Duration = Duration::from_millis(100);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -153,11 +154,19 @@ fn run_game(options: CliOptions) -> Result<(), Box<dyn Error>> {
             }
         }
 
+        let tick_progress = accumulator.as_secs_f64() / PHYSICS_STEP.as_secs_f64();
         terminal.terminal_mut().draw(|frame| {
-            ui::draw(frame, &game, high_score, new_best, ui_options);
+            ui::draw_interpolated(
+                frame,
+                &game,
+                high_score,
+                new_best,
+                ui_options,
+                tick_progress,
+            );
         })?;
 
-        let poll_timeout = FRAME_TIME.saturating_sub(frame_started.elapsed());
+        let poll_timeout = RENDER_FRAME_TIME.saturating_sub(frame_started.elapsed());
         if event::poll(poll_timeout)? {
             loop {
                 if let Event::Key(key) = event::read()?

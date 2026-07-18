@@ -2,6 +2,7 @@
 
 use ratatui::{
     Frame,
+    buffer::{Buffer, Cell},
     layout::{Alignment, Rect},
     style::{Color, Modifier, Style},
     symbols::border,
@@ -11,8 +12,8 @@ use ratatui::{
 
 use crate::game::{
     BIRD_ART_HEIGHT, BIRD_ART_OFFSET_X, BIRD_ART_OFFSET_Y, BIRD_ART_WIDTH, GROUND_Y, Game,
-    MAX_FIELD_HEIGHT, MAX_FIELD_WIDTH, MIN_FIELD_HEIGHT, MIN_FIELD_WIDTH, Medal, PIPE_WIDTH, Phase,
-    VIRTUAL_HEIGHT, VIRTUAL_WIDTH,
+    MAX_FIELD_HEIGHT, MAX_FIELD_WIDTH, MIN_FIELD_HEIGHT, MIN_FIELD_WIDTH, Medal,
+    PIPE_SPEED_PER_TICK, PIPE_WIDTH, Phase, VIRTUAL_HEIGHT, VIRTUAL_WIDTH,
 };
 use crate::theme::{ResolvedTheme, ThemeState};
 
@@ -124,10 +125,31 @@ pub fn fits(area: Rect, game: &Game) -> bool {
     area.width >= needed_width && area.height >= needed_height
 }
 
-/// Draw one complete game frame.
+/// Draw one complete game frame at the latest fixed simulation state.
 pub fn draw(frame: &mut Frame<'_>, game: &Game, best: u32, new_best: bool, options: UiOptions) {
+    draw_interpolated(frame, game, best, new_best, options, 0.0);
+}
+
+/// Draw a game frame with moving scenery sampled between fixed simulation ticks.
+///
+/// `tick_progress` is the fraction of the upcoming 60 Hz physics step which has
+/// elapsed. It affects presentation only; scoring, collision detection, and all
+/// other gameplay continue to use the fixed simulation state.
+pub fn draw_interpolated(
+    frame: &mut Frame<'_>,
+    game: &Game,
+    best: u32,
+    new_best: bool,
+    options: UiOptions,
+    tick_progress: f64,
+) {
     let area = frame.area();
     let palette = Palette::new(options.color, options.theme.resolved());
+    let render_context = RenderContext {
+        options,
+        palette,
+        tick_progress,
+    };
 
     frame.render_widget(Block::default().style(palette.screen()), area);
 
@@ -156,7 +178,7 @@ pub fn draw(frame: &mut Frame<'_>, game: &Game, best: u32, new_best: bool, optio
     );
 
     draw_header(frame, header, game, best, options, palette);
-    draw_field(frame, field, game, best, new_best, options, palette);
+    draw_field(frame, field, game, best, new_best, render_context);
     draw_footer(frame, footer, game.phase, options, palette);
 }
 
@@ -164,6 +186,13 @@ pub fn draw(frame: &mut Frame<'_>, game: &Game, best: u32, new_best: bool, optio
 struct Palette {
     color: bool,
     theme: ResolvedTheme,
+}
+
+#[derive(Clone, Copy)]
+struct RenderContext {
+    options: UiOptions,
+    palette: Palette,
+    tick_progress: f64,
 }
 
 impl Palette {
@@ -369,9 +398,13 @@ fn draw_field(
     game: &Game,
     best: u32,
     new_best: bool,
-    options: UiOptions,
-    palette: Palette,
+    context: RenderContext,
 ) {
+    let RenderContext {
+        options,
+        palette,
+        tick_progress,
+    } = context;
     let phase_label = match game.phase {
         Phase::Ready => " READY ",
         Phase::Playing => " FLYING ",
@@ -401,7 +434,7 @@ fn draw_field(
     );
 
     draw_sky(frame, inner, game.elapsed, options, palette);
-    draw_pipes(frame, inner, game, options, palette);
+    draw_pipes(frame, inner, game, options, palette, tick_progress);
     draw_bird(frame, inner, game, options, palette);
     draw_ground(frame, inner, options, palette);
 
@@ -494,20 +527,16 @@ fn draw_pipes(
     game: &Game,
     options: UiOptions,
     palette: Palette,
+    tick_progress: f64,
 ) {
-    let (body, shadow, cap) = if options.ascii {
-        ("#", "|", "=")
-    } else {
-        ("█", "▓", "█")
-    };
     let buffer = frame.buffer_mut();
-
     let ground_top = project_floor(f64::from(GROUND_Y), VIRTUAL_HEIGHT, game.height)
         .clamp(0, i32::from(game.height));
 
     for pipe in &game.pipes {
-        let pipe_left = project_floor(pipe.x, VIRTUAL_WIDTH, game.width);
-        let pipe_right = project_ceil(pipe.x + f64::from(PIPE_WIDTH), VIRTUAL_WIDTH, game.width);
+        let visual_x = visual_pipe_x(pipe.x, game.phase, tick_progress);
+        let pipe_left = project_exact(visual_x, VIRTUAL_WIDTH, game.width);
+        let pipe_right = project_exact(visual_x + f64::from(PIPE_WIDTH), VIRTUAL_WIDTH, game.width);
         let gap_top = project_floor(f64::from(pipe.gap_top), VIRTUAL_HEIGHT, game.height);
         let gap_bottom = project_ceil(
             f64::from(pipe.gap_top + pipe.gap_height),
@@ -517,51 +546,224 @@ fn draw_pipes(
         // Preserve one visible lower-pipe cap when the virtual pipe starts in
         // the same coarse terminal row as the ground.
         let lower_pipe_top = visible_lower_pipe_top(gap_bottom, ground_top);
-        // The original cap is wider than its shaft. Half-cell edge glyphs keep
-        // the full collision span visible without turning the shaft into a box.
-        let shaft_inset = i32::from(pipe_right - pipe_left >= 5);
-        let shaft_left = pipe_left + shaft_inset;
-        let shaft_right = pipe_right - shaft_inset;
 
-        for logical_x in pipe_left.max(0)..pipe_right.min(i32::from(game.width)) {
-            for logical_y in 0..ground_top {
-                if logical_y >= gap_top && logical_y < lower_pipe_top {
-                    continue;
-                }
+        if options.ascii {
+            draw_ascii_pipe(
+                buffer,
+                area,
+                game.width,
+                ground_top,
+                gap_top,
+                lower_pipe_top,
+                pipe_left,
+                pipe_right,
+                palette,
+            );
+            continue;
+        }
 
-                let at_cap = logical_y + 1 == gap_top || logical_y == lower_pipe_top;
-                let at_shaft_edge = !at_cap && (logical_x < shaft_left || logical_x >= shaft_right);
-                let active_right = if at_cap { pipe_right } else { shaft_right };
-                let at_shadow = logical_x + 1 == active_right;
-                let symbol = if at_cap {
-                    cap
-                } else if at_shaft_edge {
-                    if options.ascii {
-                        "|"
-                    } else if logical_x < shaft_left {
-                        "▐"
-                    } else {
-                        "▌"
-                    }
-                } else if at_shadow {
-                    shadow
-                } else {
-                    body
-                };
-                let style = if at_shaft_edge || (at_shadow && !at_cap) {
-                    palette.fg(Palette::LIME_SHADOW)
-                } else {
-                    palette.fg(Palette::LIME).add_modifier(Modifier::BOLD)
-                };
-                let x = area.x.saturating_add(logical_x as u16);
-                let y = area.y.saturating_add(logical_y as u16);
+        // A stable half-cell inset keeps wide shafts narrower than their caps.
+        // Basing this on exact width avoids the old one-cell breathing as a
+        // rounded edge crossed a character boundary.
+        let shaft_inset = if pipe_right - pipe_left > 4.0 {
+            0.5
+        } else {
+            0.0
+        };
 
-                if let Some(cell) = buffer.cell_mut((x, y)) {
-                    cell.set_symbol(symbol).set_style(style);
-                }
+        for logical_y in 0..ground_top {
+            if logical_y >= gap_top && logical_y < lower_pipe_top {
+                continue;
+            }
+
+            let at_cap = logical_y + 1 == gap_top || logical_y == lower_pipe_top;
+            let (left, right) = if at_cap {
+                (pipe_left, pipe_right)
+            } else {
+                (pipe_left + shaft_inset, pipe_right - shaft_inset)
+            };
+            draw_unicode_pipe_row(
+                buffer,
+                area,
+                game.width,
+                logical_y,
+                left,
+                right,
+                at_cap,
+                shaft_inset > 0.0,
+                palette,
+            );
+        }
+    }
+}
+
+const LEFT_BLOCKS: [&str; 9] = [" ", "▏", "▎", "▍", "▌", "▋", "▊", "▉", "█"];
+
+fn visual_pipe_x(pipe_x: f64, phase: Phase, tick_progress: f64) -> f64 {
+    if phase != Phase::Playing {
+        return pipe_x;
+    }
+
+    let progress = if tick_progress.is_finite() {
+        tick_progress.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    pipe_x - PIPE_SPEED_PER_TICK * progress
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_ascii_pipe(
+    buffer: &mut Buffer,
+    area: Rect,
+    field_width: u16,
+    ground_top: i32,
+    gap_top: i32,
+    lower_pipe_top: i32,
+    exact_left: f64,
+    exact_right: f64,
+    palette: Palette,
+) {
+    let pipe_left = exact_left.floor() as i32;
+    let pipe_right = exact_right.ceil() as i32;
+    let shaft_inset = i32::from(pipe_right - pipe_left >= 5);
+    let shaft_left = pipe_left + shaft_inset;
+    let shaft_right = pipe_right - shaft_inset;
+
+    for logical_x in pipe_left.max(0)..pipe_right.min(i32::from(field_width)) {
+        for logical_y in 0..ground_top {
+            if logical_y >= gap_top && logical_y < lower_pipe_top {
+                continue;
+            }
+
+            let at_cap = logical_y + 1 == gap_top || logical_y == lower_pipe_top;
+            let at_shaft_edge = !at_cap && (logical_x < shaft_left || logical_x >= shaft_right);
+            let active_right = if at_cap { pipe_right } else { shaft_right };
+            let at_shadow = logical_x + 1 == active_right;
+            let symbol = if at_cap {
+                "="
+            } else if at_shaft_edge || at_shadow {
+                "|"
+            } else {
+                "#"
+            };
+            let style = if at_shaft_edge || (at_shadow && !at_cap) {
+                palette.fg(Palette::LIME_SHADOW)
+            } else {
+                palette.fg(Palette::LIME).add_modifier(Modifier::BOLD)
+            };
+            let x = area.x.saturating_add(logical_x as u16);
+            let y = area.y.saturating_add(logical_y as u16);
+
+            if let Some(cell) = buffer.cell_mut((x, y)) {
+                cell.set_symbol(symbol).set_style(style);
             }
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_unicode_pipe_row(
+    buffer: &mut Buffer,
+    area: Rect,
+    field_width: u16,
+    logical_y: i32,
+    left: f64,
+    right: f64,
+    cap: bool,
+    shade_leading_edge: bool,
+    palette: Palette,
+) {
+    let first_cell = (left.floor() as i32).max(0);
+    let last_cell = (right.ceil() as i32).min(i32::from(field_width));
+    let background = if logical_y % 2 == 0 {
+        Palette::SKY_A
+    } else {
+        Palette::SKY_B
+    };
+
+    for logical_x in first_cell..last_cell {
+        let cell_left = f64::from(logical_x);
+        let coverage_start = (left - cell_left).clamp(0.0, 1.0);
+        let coverage_end = (right - cell_left).clamp(0.0, 1.0);
+        if coverage_end <= coverage_start {
+            continue;
+        }
+
+        let at_leading_edge = left > cell_left && left < cell_left + 1.0;
+        let in_trailing_shadow = cell_left + 2.0 > right;
+        let shadow = !cap && (in_trailing_shadow || (shade_leading_edge && at_leading_edge));
+        let fill = if shadow {
+            Palette::LIME_SHADOW
+        } else {
+            Palette::LIME
+        };
+        let full_symbol = if shadow { "▓" } else { "█" };
+        let x = area.x.saturating_add(logical_x as u16);
+        let y = area.y.saturating_add(logical_y as u16);
+
+        if let Some(cell) = buffer.cell_mut((x, y)) {
+            draw_horizontal_subcell(
+                cell,
+                coverage_start,
+                coverage_end,
+                full_symbol,
+                fill,
+                background,
+                palette,
+                !shadow,
+            );
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_horizontal_subcell(
+    cell: &mut Cell,
+    coverage_start: f64,
+    coverage_end: f64,
+    full_symbol: &'static str,
+    fill: Color,
+    background: Color,
+    palette: Palette,
+    bold: bool,
+) {
+    let start_eighth = quantize_eighths(coverage_start);
+    let end_eighth = quantize_eighths(coverage_end);
+    if end_eighth <= start_eighth {
+        return;
+    }
+
+    let mut style = if start_eighth == 0 && end_eighth == 8 {
+        cell.set_symbol(full_symbol);
+        palette.fg(fill)
+    } else if start_eighth == 0 {
+        cell.set_symbol(LEFT_BLOCKS[end_eighth]);
+        palette.on(fill, background)
+    } else if end_eighth == 8 {
+        // Unicode has left-aligned eighth blocks only. Swapping foreground and
+        // background turns the empty left fraction into a right-aligned fill.
+        cell.set_symbol(LEFT_BLOCKS[start_eighth]);
+        if palette.color {
+            palette.on(background, fill)
+        } else {
+            Style::default().add_modifier(Modifier::REVERSED)
+        }
+    } else {
+        // Pipe spans are wider than a cell, so this is only a defensive fallback
+        // for a heavily clipped interval.
+        cell.set_symbol(LEFT_BLOCKS[end_eighth - start_eighth]);
+        palette.on(fill, background)
+    };
+
+    if bold {
+        style = style.add_modifier(Modifier::BOLD);
+    }
+    cell.set_style(style);
+}
+
+fn quantize_eighths(value: f64) -> usize {
+    (value.clamp(0.0, 1.0) * 8.0).round() as usize
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -733,15 +935,19 @@ fn draw_ground(frame: &mut Frame<'_>, area: Rect, options: UiOptions, palette: P
 }
 
 fn project_floor(value: f64, virtual_extent: u16, terminal_extent: u16) -> i32 {
-    (value * f64::from(terminal_extent) / f64::from(virtual_extent)).floor() as i32
+    project_exact(value, virtual_extent, terminal_extent).floor() as i32
 }
 
 fn project_ceil(value: f64, virtual_extent: u16, terminal_extent: u16) -> i32 {
-    (value * f64::from(terminal_extent) / f64::from(virtual_extent)).ceil() as i32
+    project_exact(value, virtual_extent, terminal_extent).ceil() as i32
 }
 
 fn project_round(value: f64, virtual_extent: u16, terminal_extent: u16) -> i32 {
-    (value * f64::from(terminal_extent) / f64::from(virtual_extent)).round() as i32
+    project_exact(value, virtual_extent, terminal_extent).round() as i32
+}
+
+fn project_exact(value: f64, virtual_extent: u16, terminal_extent: u16) -> f64 {
+    value * f64::from(terminal_extent) / f64::from(virtual_extent)
 }
 
 fn project_extent(value: u16, virtual_extent: u16, terminal_extent: u16) -> i32 {
@@ -1532,12 +1738,54 @@ mod tests {
         assert_eq!(buffer[(7, 3)].symbol(), "╔");
         assert_eq!(buffer[(28, 3)].symbol(), "╗");
 
-        let pipe_cells: Vec<u16> = (0..width)
-            .filter(|x| matches!(buffer[(*x, 6)].symbol(), "█" | "▓"))
+        let pipe_cells: Vec<(u16, &str)> = (0..width)
+            .filter_map(|x| {
+                let symbol = buffer[(x, 6)].symbol();
+                matches!(symbol, "▎" | "█" | "▓" | "▊").then_some((x, symbol))
+            })
             .collect();
-        assert_eq!(pipe_cells, vec![21, 22, 23, 24]);
+        assert_eq!(pipe_cells, vec![(21, "▎"), (22, "█"), (23, "▓"), (24, "▊")]);
         assert_eq!(buffer[(13, 13)].symbol(), "●");
         assert_eq!(buffer[(14, 13)].symbol(), "▶");
+    }
+
+    #[test]
+    fn pipe_edges_advance_between_fixed_physics_ticks() {
+        let mut game = Game::new(MAX_FIELD_WIDTH, MAX_FIELD_HEIGHT, 7);
+        game.phase = Phase::Playing;
+        game.pipes = vec![Pipe {
+            x: 100.0,
+            gap_top: 180,
+            gap_height: 96,
+            scored: false,
+        }];
+        let options = test_options(false, ThemeMode::Dark);
+        let palette = Palette::new(true, options.theme.resolved());
+
+        let render = |tick_progress| {
+            let backend = TestBackend::new(game.width, game.height);
+            let mut terminal = Terminal::new(backend).expect("test terminal");
+            terminal
+                .draw(|frame| {
+                    let area = Rect::new(0, 0, game.width, game.height);
+                    draw_sky(frame, area, game.elapsed, options, palette);
+                    draw_pipes(frame, area, &game, options, palette, tick_progress);
+                })
+                .expect("draw interpolated pipe");
+            terminal.backend().buffer()[(16, 2)].clone()
+        };
+
+        let at_tick = render(0.0);
+        let halfway = render(0.5);
+        assert_eq!(at_tick.symbol(), "▏");
+        assert_eq!(halfway.symbol(), "█");
+        assert_ne!(at_tick, halfway);
+        assert_eq!(game.pipes[0].x, 100.0, "rendering must not alter physics");
+
+        assert_eq!(visual_pipe_x(100.0, Phase::Playing, 0.5), 99.0);
+        assert_eq!(visual_pipe_x(100.0, Phase::Paused, 0.5), 100.0);
+        assert_eq!(visual_pipe_x(100.0, Phase::Dying, 0.5), 100.0);
+        assert_eq!(visual_pipe_x(100.0, Phase::Playing, f64::NAN), 100.0);
     }
 
     #[test]
@@ -1559,17 +1807,11 @@ mod tests {
             .expect("draw frame");
 
         let buffer = terminal.backend().buffer();
-        let shaft: Vec<&str> = (1..=9).map(|x| buffer[(x, 6)].symbol()).collect();
+        let shaft: Vec<&str> = (1..=8).map(|x| buffer[(x, 6)].symbol()).collect();
         let cap: Vec<&str> = (1..=9).map(|x| buffer[(x, 17)].symbol()).collect();
 
-        assert_eq!(shaft.first(), Some(&"▐"));
-        assert_eq!(shaft.last(), Some(&"▌"));
-        assert!(
-            shaft[1..8]
-                .iter()
-                .all(|symbol| matches!(*symbol, "█" | "▓"))
-        );
-        assert!(cap.iter().all(|symbol| *symbol == "█"));
+        assert_eq!(shaft, vec!["▌", "█", "█", "█", "█", "█", "▓", "▋"]);
+        assert_eq!(cap, vec!["█", "█", "█", "█", "█", "█", "█", "█", "▏"]);
     }
 
     #[test]
