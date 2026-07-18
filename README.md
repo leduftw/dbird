@@ -25,7 +25,15 @@ cargo run --release
 
 ### Install
 
-Install the latest version directly from GitHub to make `dbird` available on your shell path:
+Install with a package manager:
+
+```sh
+cargo install dbird                 # crates.io, any platform with Rust
+brew install leduftw/tap/dbird      # Homebrew on macOS or Linux
+winget install leduftw.dbird        # Windows (pending winget-pkgs approval)
+```
+
+Or install the latest development version directly from GitHub:
 
 ```sh
 cargo install --locked --git https://github.com/leduftw/dbird.git

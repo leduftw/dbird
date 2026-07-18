@@ -276,7 +276,7 @@ mod tests {
 
     #[test]
     fn version_line_uses_package_metadata() {
-        assert_eq!(version_text(), "dbird 1.0.0");
+        assert_eq!(version_text(), concat!("dbird ", env!("CARGO_PKG_VERSION")));
     }
 
     #[cfg(unix)]

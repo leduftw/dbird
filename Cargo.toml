@@ -1,10 +1,15 @@
 [package]
 name = "dbird"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2024"
 rust-version = "1.88"
 description = "A fully playable terminal recreation of the classic Flappy Bird game"
 license = "MIT"
+repository = "https://github.com/leduftw/dbird"
+readme = "README.md"
+keywords = ["game", "terminal", "tui", "flappy-bird", "arcade"]
+categories = ["games", "command-line-utilities"]
+exclude = [".github/", ".gitignore"]
 
 [dependencies]
 crossterm = "0.29.0"
