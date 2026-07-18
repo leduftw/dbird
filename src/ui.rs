@@ -582,17 +582,10 @@ fn draw_pipes(
             } else {
                 (pipe_left + shaft_inset, pipe_right - shaft_inset)
             };
-            draw_unicode_pipe_row(
-                buffer,
-                area,
-                game.width,
-                logical_y,
-                left,
-                right,
-                at_cap,
-                shaft_inset > 0.0,
-                palette,
-            );
+            draw_unicode_pipe_row(buffer, area, game.width, logical_y, left, right, palette);
+            if !at_cap && palette.color {
+                draw_pipe_shadow_row(buffer, area, game.width, logical_y, left, right, palette);
+            }
         }
     }
 }
@@ -662,7 +655,6 @@ fn draw_ascii_pipe(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn draw_unicode_pipe_row(
     buffer: &mut Buffer,
     area: Rect,
@@ -670,8 +662,6 @@ fn draw_unicode_pipe_row(
     logical_y: i32,
     left: f64,
     right: f64,
-    cap: bool,
-    shade_leading_edge: bool,
     palette: Palette,
 ) {
     let first_cell = (left.floor() as i32).max(0);
@@ -690,15 +680,6 @@ fn draw_unicode_pipe_row(
             continue;
         }
 
-        let at_leading_edge = left > cell_left && left < cell_left + 1.0;
-        let in_trailing_shadow = cell_left + 2.0 > right;
-        let shadow = !cap && (in_trailing_shadow || (shade_leading_edge && at_leading_edge));
-        let fill = if shadow {
-            Palette::LIME_SHADOW
-        } else {
-            Palette::LIME
-        };
-        let full_symbol = if shadow { "▓" } else { "█" };
         let x = area.x.saturating_add(logical_x as u16);
         let y = area.y.saturating_add(logical_y as u16);
 
@@ -707,12 +688,71 @@ fn draw_unicode_pipe_row(
                 cell,
                 coverage_start,
                 coverage_end,
-                full_symbol,
-                fill,
+                "█",
+                Palette::LIME,
                 background,
                 palette,
-                !shadow,
+                true,
             );
+        }
+    }
+}
+
+fn draw_pipe_shadow_row(
+    buffer: &mut Buffer,
+    area: Rect,
+    field_width: u16,
+    logical_y: i32,
+    pipe_left: f64,
+    pipe_right: f64,
+    palette: Palette,
+) {
+    const SHADOW_WIDTH: f64 = 1.0;
+
+    let shadow_left = (pipe_right - SHADOW_WIDTH).max(pipe_left);
+    let first_cell = (shadow_left.floor() as i32).max(0);
+    let last_cell = (pipe_right.ceil() as i32).min(i32::from(field_width));
+    let sky = if logical_y % 2 == 0 {
+        Palette::SKY_A
+    } else {
+        Palette::SKY_B
+    };
+
+    for logical_x in first_cell..last_cell {
+        let cell_left = f64::from(logical_x);
+        let start_eighth = quantize_eighths((shadow_left - cell_left).clamp(0.0, 1.0));
+        let end_eighth = quantize_eighths((pipe_right - cell_left).clamp(0.0, 1.0));
+        if end_eighth <= start_eighth {
+            continue;
+        }
+
+        let (symbol, style) = if start_eighth == 0 && end_eighth == 8 {
+            ("█", palette.fg(Palette::LIME_SHADOW))
+        } else if end_eighth == 8 {
+            // The body occupies the left fraction and the shadow the right.
+            (
+                LEFT_BLOCKS[start_eighth],
+                palette.on(Palette::LIME, Palette::LIME_SHADOW),
+            )
+        } else if start_eighth == 0 {
+            // The shadow occupies the left fraction and sky the right.
+            (
+                LEFT_BLOCKS[end_eighth],
+                palette.on(Palette::LIME_SHADOW, sky),
+            )
+        } else {
+            // The pipe is always wider than its one-cell shadow, so this is only
+            // a defensive fallback for an interval clipped at both boundaries.
+            (
+                LEFT_BLOCKS[end_eighth - start_eighth],
+                palette.on(Palette::LIME_SHADOW, sky),
+            )
+        };
+        let x = area.x.saturating_add(logical_x as u16);
+        let y = area.y.saturating_add(logical_y as u16);
+
+        if let Some(cell) = buffer.cell_mut((x, y)) {
+            cell.set_symbol(symbol).set_style(style);
         }
     }
 }
@@ -1744,7 +1784,7 @@ mod tests {
                 matches!(symbol, "▎" | "█" | "▓" | "▊").then_some((x, symbol))
             })
             .collect();
-        assert_eq!(pipe_cells, vec![(21, "▎"), (22, "█"), (23, "▓"), (24, "▊")]);
+        assert_eq!(pipe_cells, vec![(21, "▎"), (22, "█"), (23, "▊"), (24, "▊")]);
         assert_eq!(buffer[(13, 13)].symbol(), "●");
         assert_eq!(buffer[(14, 13)].symbol(), "▶");
     }
@@ -1789,6 +1829,83 @@ mod tests {
     }
 
     #[test]
+    fn pipe_shadow_stays_one_cell_wide_through_motion() {
+        let mut game = Game::new(MAX_FIELD_WIDTH, MAX_FIELD_HEIGHT, 7);
+        game.phase = Phase::Playing;
+        game.pipes = vec![Pipe {
+            x: 100.0,
+            gap_top: 180,
+            gap_height: 96,
+            scored: false,
+        }];
+        let options = test_options(false, ThemeMode::Dark);
+        let palette = Palette::new(true, ResolvedTheme::Dark);
+
+        for tick_progress in [0.0, 0.25, 0.5, 0.75, 1.0] {
+            let backend = TestBackend::new(game.width, game.height);
+            let mut terminal = Terminal::new(backend).expect("test terminal");
+            terminal
+                .draw(|frame| {
+                    let area = Rect::new(0, 0, game.width, game.height);
+                    draw_sky(frame, area, game.elapsed, options, palette);
+                    draw_pipes(frame, area, &game, options, palette, tick_progress);
+                })
+                .expect("draw interpolated pipe shadow");
+
+            let buffer = terminal.backend().buffer();
+            let shadow_eighths = (0..game.width)
+                .map(|x| {
+                    let cell = &buffer[(x, 2)];
+                    let block_eighths = LEFT_BLOCKS
+                        .iter()
+                        .position(|symbol| *symbol == cell.symbol())
+                        .unwrap_or(0);
+                    if cell.fg == Palette::LIME_SHADOW {
+                        block_eighths
+                    } else if cell.fg == Palette::LIME && cell.bg == Palette::LIME_SHADOW {
+                        8 - block_eighths
+                    } else {
+                        0
+                    }
+                })
+                .sum::<usize>();
+
+            assert_eq!(
+                shadow_eighths, 8,
+                "shadow width pulsed at tick progress {tick_progress}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_color_pipe_uses_one_fill_without_a_blinking_shadow_band() {
+        let mut game = Game::new(MAX_FIELD_WIDTH, MAX_FIELD_HEIGHT, 7);
+        game.phase = Phase::Playing;
+        game.pipes = vec![Pipe {
+            x: 0.0,
+            gap_top: 180,
+            gap_height: 96,
+            scored: false,
+        }];
+        let options = UiOptions {
+            ascii: false,
+            color: false,
+            theme: ThemeState::explicit(ThemeMode::Dark),
+        };
+        let (width, height) = required_size(&game);
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| draw(frame, &game, 0, false, options))
+            .expect("draw monochrome pipe");
+
+        let buffer = terminal.backend().buffer();
+        let shaft: Vec<&str> = (1..=8).map(|x| buffer[(x, 6)].symbol()).collect();
+        assert_eq!(shaft, vec!["▌", "█", "█", "█", "█", "█", "█", "▋"]);
+        assert!(buffer.content().iter().all(|cell| cell.symbol() != "▓"));
+    }
+
+    #[test]
     fn large_pipe_has_a_wide_cap_and_visible_collision_edges() {
         let mut game = Game::new(MAX_FIELD_WIDTH, MAX_FIELD_HEIGHT, 7);
         game.phase = Phase::Playing;
@@ -1800,18 +1917,23 @@ mod tests {
         }];
 
         let (width, height) = required_size(&game);
+        let options = test_options(false, ThemeMode::Dark);
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).expect("test terminal");
         terminal
-            .draw(|frame| draw(frame, &game, 0, false, UiOptions::default()))
+            .draw(|frame| draw(frame, &game, 0, false, options))
             .expect("draw frame");
 
         let buffer = terminal.backend().buffer();
         let shaft: Vec<&str> = (1..=8).map(|x| buffer[(x, 6)].symbol()).collect();
         let cap: Vec<&str> = (1..=9).map(|x| buffer[(x, 17)].symbol()).collect();
 
-        assert_eq!(shaft, vec!["▌", "█", "█", "█", "█", "█", "▓", "▋"]);
+        assert_eq!(shaft, vec!["▌", "█", "█", "█", "█", "█", "▋", "▋"]);
         assert_eq!(cap, vec!["█", "█", "█", "█", "█", "█", "█", "█", "▏"]);
+        assert_eq!(buffer[(7, 6)].fg, Palette::LIME);
+        assert_eq!(buffer[(7, 6)].bg, Palette::LIME_SHADOW);
+        assert_eq!(buffer[(8, 6)].fg, Palette::LIME_SHADOW);
+        assert_eq!(buffer[(8, 6)].bg, Palette::SKY_A);
     }
 
     #[test]
