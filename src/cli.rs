@@ -24,7 +24,7 @@ Options:
       --ascii          Use ASCII-only graphics
       --no-color       Disable colored output
       --mute           Disable sound effects
-      --seed <u64>     Use a deterministic random seed
+      --seed <u64>     Play the same deterministic course every round
       --reset-score    Reset the saved high score before starting
   -h, --help           Print help
   -V, --version        Print version

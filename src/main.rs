@@ -69,6 +69,9 @@ fn run_game(options: CliOptions) -> Result<(), Box<dyn Error>> {
     let (field_width, field_height) = ui::field_size(initial_area);
     let seed = options.seed.unwrap_or_else(random_seed);
     let mut game = Game::new(field_width, field_height, seed);
+    if options.seed.is_some() {
+        game.lock_course();
+    }
     let mut ui_options = UiOptions {
         ascii: options.ascii,
         color: !options.no_color,

@@ -166,6 +166,7 @@ pub struct Game {
 
     initial_seed: u64,
     round: u64,
+    course_locked: bool,
     rng_state: u64,
     accumulator: f64,
     playing_ticks: u64,
@@ -191,6 +192,7 @@ impl Game {
             elapsed: 0.0,
             initial_seed: seed,
             round: 0,
+            course_locked: false,
             rng_state: seed,
             accumulator: 0.0,
             playing_ticks: 0,
@@ -282,12 +284,21 @@ impl Game {
         }
     }
 
-    /// Start a clean ready round with the next deterministic course.
+    /// Start a clean ready round with the next deterministic course, or the
+    /// same course again when it is locked.
     pub fn restart(&mut self, width: u16, height: u16) {
         self.width = width.clamp(MIN_FIELD_WIDTH, MAX_FIELD_WIDTH);
         self.height = height.clamp(MIN_FIELD_HEIGHT, MAX_FIELD_HEIGHT);
-        self.round = self.round.wrapping_add(1);
+        if !self.course_locked {
+            self.round = self.round.wrapping_add(1);
+        }
         self.reset_round();
+    }
+
+    /// Replay the same course on every restart instead of advancing to the
+    /// next one.
+    pub fn lock_course(&mut self) {
+        self.course_locked = true;
     }
 
     /// Fixed horizontal pipe speed, in virtual pixels per simulation tick.
@@ -938,6 +949,23 @@ mod tests {
         assert_eq!(first.bird_y, f64::from(BIRD_START_Y));
         assert_eq!(first.pipes, second.pipes);
         assert_ne!(first.pipes, original.pipes);
+    }
+
+    #[test]
+    fn locked_course_replays_the_same_round_after_every_restart() {
+        let mut locked = Game::new(100, 30, 0xfeed_beef);
+        locked.lock_course();
+        locked.start();
+        finish_warmup(&mut locked);
+        let first_course = locked.pipes.clone();
+
+        for _ in 0..2 {
+            locked.restart(100, 30);
+            assert_eq!(locked.phase, Phase::Ready);
+            locked.start();
+            finish_warmup(&mut locked);
+            assert_eq!(locked.pipes, first_course);
+        }
     }
 
     #[test]

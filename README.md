@@ -64,7 +64,7 @@ The theme starts in System mode on every launch. On macOS and Windows it follows
 --ascii          use plain ASCII graphics
 --no-color       disable the color palette
 --mute           disable sound effects
---seed <NUMBER>  use deterministic pipe placement
+--seed <NUMBER>  play the same deterministic course every round
 --reset-score    clear the saved high score before starting
 -h, --help       show help
 -V, --version    show the version
