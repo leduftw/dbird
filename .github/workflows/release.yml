@@ -178,14 +178,13 @@ jobs:
           git push
 
   # Opens a manifest-update PR against microsoft/winget-pkgs. Needs the
-  # WINGET_TOKEN secret: a classic PAT with the public_repo scope. This job
-  # cannot succeed until the initial leduftw.dbird submission (winget-pkgs
-  # PR #404373) is merged, so a failure here does not fail the release.
+  # WINGET_TOKEN secret: a classic PAT with the public_repo scope. Until the
+  # initial leduftw.dbird submission (winget-pkgs PR #404373) is merged the
+  # package cannot be updated, so that case is reported and skipped.
   publish-winget:
     if: startsWith(github.ref, 'refs/tags/')
     needs: release
     runs-on: windows-latest
-    continue-on-error: true
     steps:
       - name: Submit manifest update
         env:
@@ -194,4 +193,11 @@ jobs:
           $version = $env:GITHUB_REF_NAME.TrimStart("v")
           $url = "https://github.com/leduftw/dbird/releases/download/v$version/dbird-v$version-x86_64-pc-windows-msvc.zip"
           Invoke-WebRequest https://aka.ms/wingetcreate/latest -OutFile wingetcreate.exe
-          .\wingetcreate.exe update leduftw.dbird --version $version --urls $url --submit --token $env:WINGET_TOKEN
+          $output = .\wingetcreate.exe update leduftw.dbird --version $version --urls $url --submit --token $env:WINGET_TOKEN 2>&1
+          $code = $LASTEXITCODE
+          $output | Write-Output
+          if ($code -ne 0 -and "$output" -match "was not found") {
+            Write-Output "::notice::leduftw.dbird is not in winget-pkgs yet (initial submission pending); skipping."
+            exit 0
+          }
+          exit $code
