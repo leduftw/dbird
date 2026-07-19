@@ -188,12 +188,12 @@ jobs:
     steps:
       - name: Submit manifest update
         env:
-          WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+          WINGET_CREATE_GITHUB_TOKEN: ${{ secrets.WINGET_TOKEN }}
         run: |
           $version = $env:GITHUB_REF_NAME.TrimStart("v")
           $url = "https://github.com/leduftw/dbird/releases/download/v$version/dbird-v$version-x86_64-pc-windows-msvc.zip"
           Invoke-WebRequest https://aka.ms/wingetcreate/latest -OutFile wingetcreate.exe
-          $output = .\wingetcreate.exe update leduftw.dbird --version $version --urls $url --submit --token $env:WINGET_TOKEN 2>&1
+          $output = .\wingetcreate.exe update leduftw.dbird --version $version --urls $url --submit 2>&1
           $code = $LASTEXITCODE
           $output | Write-Output
           if ($code -ne 0 -and "$output" -match "was not found") {
