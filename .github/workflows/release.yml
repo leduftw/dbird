@@ -65,6 +65,14 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+      - name: Verify tag matches Cargo.toml version
+        run: |
+          crate_version="$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)"
+          if [[ "v${crate_version}" != "${GITHUB_REF_NAME}" ]]; then
+            echo "Tag ${GITHUB_REF_NAME} does not match Cargo.toml version ${crate_version}" >&2
+            exit 1
+          fi
       - uses: actions/download-artifact@v4
         with:
           merge-multiple: true
@@ -77,3 +85,113 @@ jobs:
           --title "dbird ${GITHUB_REF_NAME}"
           --generate-notes
           ./*.tar.gz ./*.zip
+
+  # Publishes via crates.io Trusted Publishing (OIDC); no stored token.
+  # One-time setup: crates.io -> dbird -> Settings -> Trusted Publishing ->
+  # add GitHub repository leduftw/dbird with workflow file release.yml.
+  publish-crates-io:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ALSA headers
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      - name: Update Rust
+        run: |
+          rustup update stable
+          rustup default stable
+      - uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+      - run: cargo publish --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+
+  # Regenerates the formula in leduftw/homebrew-tap from this run's tarballs.
+  # Needs the HOMEBREW_TAP_TOKEN secret: a fine-grained PAT limited to that
+  # repository with Contents read/write.
+  publish-homebrew-tap:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: leduftw/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: dist
+      - name: Regenerate formula
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          sha() { sha256sum "dist/dbird-v${version}-$1.tar.gz" | cut -d' ' -f1; }
+          cat > tap/Formula/dbird.rb <<EOF
+          class Dbird < Formula
+            desc "Fully playable terminal recreation of the classic Flappy Bird game"
+            homepage "https://github.com/leduftw/dbird"
+            version "${version}"
+            license "MIT"
+
+            on_macos do
+              if Hardware::CPU.arm?
+                url "https://github.com/leduftw/dbird/releases/download/v#{version}/dbird-v#{version}-aarch64-apple-darwin.tar.gz"
+                sha256 "$(sha aarch64-apple-darwin)"
+              else
+                url "https://github.com/leduftw/dbird/releases/download/v#{version}/dbird-v#{version}-x86_64-apple-darwin.tar.gz"
+                sha256 "$(sha x86_64-apple-darwin)"
+              end
+            end
+
+            on_linux do
+              if Hardware::CPU.arm?
+                url "https://github.com/leduftw/dbird/releases/download/v#{version}/dbird-v#{version}-aarch64-unknown-linux-gnu.tar.gz"
+                sha256 "$(sha aarch64-unknown-linux-gnu)"
+              else
+                url "https://github.com/leduftw/dbird/releases/download/v#{version}/dbird-v#{version}-x86_64-unknown-linux-gnu.tar.gz"
+                sha256 "$(sha x86_64-unknown-linux-gnu)"
+              end
+            end
+
+            def install
+              bin.install "dbird"
+            end
+
+            test do
+              assert_match version.to_s, shell_output("#{bin}/dbird --version")
+            end
+          end
+          EOF
+      - name: Commit and push formula
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/dbird.rb
+          git commit -m "Update dbird to ${version}"
+          git push
+
+  # Opens a manifest-update PR against microsoft/winget-pkgs. Needs the
+  # WINGET_TOKEN secret: a classic PAT with the public_repo scope. This job
+  # cannot succeed until the initial leduftw.dbird submission (winget-pkgs
+  # PR #404373) is merged, so a failure here does not fail the release.
+  publish-winget:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: release
+    runs-on: windows-latest
+    continue-on-error: true
+    steps:
+      - name: Submit manifest update
+        env:
+          WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+        run: |
+          $version = $env:GITHUB_REF_NAME.TrimStart("v")
+          $url = "https://github.com/leduftw/dbird/releases/download/v$version/dbird-v$version-x86_64-pc-windows-msvc.zip"
+          Invoke-WebRequest https://aka.ms/wingetcreate/latest -OutFile wingetcreate.exe
+          .\wingetcreate.exe update leduftw.dbird --version $version --urls $url --submit --token $env:WINGET_TOKEN
