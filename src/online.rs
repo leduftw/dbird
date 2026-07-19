@@ -20,6 +20,7 @@ use crate::storage::{atomic_write, state_file_path};
 const PROFILE_VERSION: u8 = 1;
 const PROFILE_DIRECTORY: &str = "online";
 const ENDPOINT_ENVIRONMENT: &str = "DBIRD_LEADERBOARD_URL";
+const OFFICIAL_ENDPOINT: &str = "https://dbird-leaderboard.leduftw.workers.dev";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(4);
 const RESPONSE_LIMIT: u64 = 64 * 1024;
 const CREDENTIAL_BYTES: usize = 32;
@@ -236,7 +237,7 @@ impl OnlineSession {
     /// Enables online play for `username` using the configured leaderboard URL.
     pub fn connect(username: &str) -> Result<Self, OnlineError> {
         let username = Username::parse(username)?;
-        let endpoint = configured_endpoint()?;
+        let endpoint = configured_endpoint();
         let profile_path =
             state_file_path(Path::new(PROFILE_DIRECTORY).join(format!("{}.json", username.key)))
                 .ok_or_else(|| {
@@ -368,16 +369,16 @@ impl OnlineSession {
     }
 }
 
-fn configured_endpoint() -> Result<String, OnlineError> {
+fn configured_endpoint() -> String {
     let runtime = env::var(ENDPOINT_ENVIRONMENT)
         .ok()
         .filter(|value| !value.trim().is_empty());
     let embedded = option_env!("DBIRD_LEADERBOARD_URL")
         .map(str::to_owned)
         .filter(|value| !value.trim().is_empty());
-    runtime.or(embedded).ok_or_else(|| {
-        OnlineError::new("online play is not configured in this build; set DBIRD_LEADERBOARD_URL")
-    })
+    runtime
+        .or(embedded)
+        .unwrap_or_else(|| OFFICIAL_ENDPOINT.to_owned())
 }
 
 fn validate_endpoint(value: String) -> Result<String, OnlineError> {
@@ -708,6 +709,7 @@ mod tests {
 
     #[test]
     fn endpoints_require_https_except_for_local_development() {
+        assert!(validate_endpoint(OFFICIAL_ENDPOINT.into()).is_ok());
         assert_eq!(
             validate_endpoint("https://scores.example.com/".into()).expect("https endpoint"),
             "https://scores.example.com"

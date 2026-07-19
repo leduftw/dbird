@@ -11,7 +11,7 @@
     {
       "binding": "DB",
       "database_name": "dbird-leaderboard",
-      "database_id": "REPLACE_WITH_D1_DATABASE_ID",
+      "database_id": "a7584df0-962a-451f-bc74-95ab3859936c",
       "migrations_dir": "migrations"
     }
   ]

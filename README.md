@@ -77,10 +77,10 @@ The two modes keep independent best scores. Offline mode continues to use the lo
 
 Connectivity never selects a mode automatically. Internet availability can change during a run, and sending a public username and score should remain a deliberate choice.
 
-The repository includes the Cloudflare Workers + D1 service in [`leaderboard/`](https://github.com/leduftw/dbird/tree/main/leaderboard), but no public endpoint is committed. Until an operator deploys it, set `DBIRD_LEADERBOARD_URL` at runtime for development or at build time for a release:
+The official leaderboard is hosted at [`dbird-leaderboard.leduftw.workers.dev`](https://dbird-leaderboard.leduftw.workers.dev/v1/leaderboard) and is configured automatically in normal builds. The Cloudflare Workers + D1 service lives in [`leaderboard/`](https://github.com/leduftw/dbird/tree/main/leaderboard). Set `DBIRD_LEADERBOARD_URL` only to override the official service for local development or staging:
 
 ```sh
-DBIRD_LEADERBOARD_URL=https://dbird-leaderboard.example.workers.dev \
+DBIRD_LEADERBOARD_URL=http://127.0.0.1:8787 \
   cargo run --release -- --online BirdPlayer
 ```
 
