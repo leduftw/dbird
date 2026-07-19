@@ -14,11 +14,11 @@ dbird - a terminal recreation of the classic Flappy Bird game
 Usage: dbird [OPTIONS]
 
 Controls:
-  Enter                Start / retry
-  Space, Up, W, or K   Flap during flight
-  P                    Pause / resume
-  T                    Cycle System / Light / Dark theme
-  Q, Esc, or Ctrl-C    Quit
+  Enter                        Start / retry
+  Space, Up, W, K, or Click    Flap during flight
+  P                            Pause / resume
+  T                            Cycle System / Light / Dark theme
+  Q, Esc, or Ctrl-C            Quit
 
 Options:
       --ascii          Use ASCII-only graphics

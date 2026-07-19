@@ -4,7 +4,10 @@ use std::io::{self, IsTerminal, Write};
 use std::process::ExitCode;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
+    MouseEventKind,
+};
 use dbird::audio::{Audio, Sound};
 use dbird::cli::{self, CliCommand, CliOptions};
 use dbird::game::{DeathCause, Game, Phase};
@@ -169,22 +172,28 @@ fn run_game(options: CliOptions) -> Result<(), Box<dyn Error>> {
         let poll_timeout = RENDER_FRAME_TIME.saturating_sub(frame_started.elapsed());
         if event::poll(poll_timeout)? {
             loop {
-                if let Event::Key(key) = event::read()?
-                    && key.kind != KeyEventKind::Release
-                {
-                    match handle_key(key, area, fits, &mut game, &mut new_best) {
-                        KeyAction::Quit => {
-                            should_quit = true;
-                            break;
+                match event::read()? {
+                    Event::Key(key) if key.kind != KeyEventKind::Release => {
+                        match handle_key(key, area, fits, &mut game, &mut new_best) {
+                            KeyAction::Quit => {
+                                should_quit = true;
+                                break;
+                            }
+                            KeyAction::Flap => audio.play(Sound::Wing),
+                            KeyAction::Start => {
+                                pending_sounds.clear();
+                                audio.play(Sound::Wing);
+                            }
+                            KeyAction::CycleTheme => ui_options.cycle_theme(),
+                            KeyAction::None => {}
                         }
-                        KeyAction::Flap => audio.play(Sound::Wing),
-                        KeyAction::Start => {
-                            pending_sounds.clear();
-                            audio.play(Sound::Wing);
-                        }
-                        KeyAction::CycleTheme => ui_options.cycle_theme(),
-                        KeyAction::None => {}
                     }
+                    Event::Mouse(mouse)
+                        if handle_mouse(mouse, fits, &mut game) == KeyAction::Flap =>
+                    {
+                        audio.play(Sound::Wing);
+                    }
+                    _ => {}
                 }
 
                 if !event::poll(Duration::ZERO)? {
@@ -275,6 +284,13 @@ fn handle_key(
     KeyAction::None
 }
 
+fn handle_mouse(mouse: MouseEvent, terminal_fits: bool, game: &mut Game) -> KeyAction {
+    if mouse.kind == MouseEventKind::Down(MouseButton::Left) && terminal_fits && game.flap() {
+        return KeyAction::Flap;
+    }
+    KeyAction::None
+}
+
 fn random_seed() -> u64 {
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -303,6 +319,61 @@ mod tests {
         let mut key = key(code);
         key.kind = KeyEventKind::Repeat;
         key
+    }
+
+    fn mouse(kind: MouseEventKind) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn left_click_flaps_only_during_flight() {
+        let mut game = Game::new(80, 20, 7);
+        let left_down = mouse(MouseEventKind::Down(MouseButton::Left));
+
+        assert_eq!(handle_mouse(left_down, true, &mut game), KeyAction::None);
+
+        assert!(game.start());
+        assert_eq!(handle_mouse(left_down, true, &mut game), KeyAction::Flap);
+    }
+
+    #[test]
+    fn other_mouse_events_and_small_terminals_do_not_flap() {
+        let mut game = Game::new(80, 20, 7);
+        assert!(game.start());
+
+        assert_eq!(
+            handle_mouse(
+                mouse(MouseEventKind::Down(MouseButton::Left)),
+                false,
+                &mut game
+            ),
+            KeyAction::None
+        );
+        assert_eq!(
+            handle_mouse(
+                mouse(MouseEventKind::Down(MouseButton::Right)),
+                true,
+                &mut game
+            ),
+            KeyAction::None
+        );
+        assert_eq!(
+            handle_mouse(
+                mouse(MouseEventKind::Up(MouseButton::Left)),
+                true,
+                &mut game
+            ),
+            KeyAction::None
+        );
+        assert_eq!(
+            handle_mouse(mouse(MouseEventKind::Moved), true, &mut game),
+            KeyAction::None
+        );
     }
 
     #[test]

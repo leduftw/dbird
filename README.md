@@ -47,7 +47,7 @@ dbird
 | Key | Action |
 | --- | --- |
 | `Enter` | Start / retry |
-| `Space`, `↑`, `W`, or `K` | Flap during flight |
+| `Space`, `↑`, `W`, `K`, or `Left Click` | Flap during flight |
 | `P` | Pause or resume |
 | `T` | Cycle System / Light / Dark theme |
 | `Q`, `Esc`, or `Ctrl-C` | Quit |
