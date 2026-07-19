@@ -11,6 +11,9 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
+
 const APP_DIRECTORY: &str = "dbird";
 const SCORE_FILE: &str = "high-score.json";
 const FORMAT_VERSION: u64 = 1;
@@ -35,6 +38,11 @@ pub fn high_score_path() -> Option<PathBuf> {
         cfg!(target_os = "macos"),
         cfg!(target_os = "windows"),
     )
+}
+
+/// Resolves another file beneath dbird's platform-appropriate state directory.
+pub(crate) fn state_file_path(path: impl AsRef<Path>) -> Option<PathBuf> {
+    high_score_path()?.parent().map(|root| root.join(path))
 }
 
 fn non_empty_env(name: &str) -> Option<std::ffi::OsString> {
@@ -138,11 +146,11 @@ impl Default for HighScoreStore {
     }
 }
 
-fn atomic_write(path: &Path, contents: &[u8]) -> io::Result<()> {
+pub(crate) fn atomic_write(path: &Path, contents: &[u8]) -> io::Result<()> {
     let parent = path.parent().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
-            "high-score path has no parent directory",
+            "state-file path has no parent directory",
         )
     })?;
     fs::create_dir_all(parent)?;
@@ -159,11 +167,12 @@ fn atomic_write(path: &Path, contents: &[u8]) -> io::Result<()> {
             std::process::id()
         ));
 
-        let mut temporary_file = match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary_path)
-        {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+
+        let mut temporary_file = match options.open(&temporary_path) {
             Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(error) => return Err(error),

@@ -1,6 +1,7 @@
 pub mod audio;
 pub mod cli;
 pub mod game;
+pub mod online;
 pub mod signals;
 pub mod storage;
 pub mod terminal;

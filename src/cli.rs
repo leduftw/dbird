@@ -18,6 +18,7 @@ Controls:
   Space, Up, W, K, or Click    Flap during flight
   P                            Pause / resume
   T                            Cycle System / Light / Dark theme
+  L                            Show the global leaderboard (online only)
   Q, Esc, or Ctrl-C            Quit
 
 Options:
@@ -25,7 +26,8 @@ Options:
       --no-color       Disable colored output
       --mute           Disable sound effects
       --seed <u64>     Play the same deterministic course every round
-      --reset-score    Reset the saved high score before starting
+      --online <name>  Opt in to the global leaderboard as this username
+      --reset-score    Reset the saved offline high score before starting
   -h, --help           Print help
   -V, --version        Print version
 ";
@@ -37,6 +39,7 @@ pub struct CliOptions {
     pub no_color: bool,
     pub mute: bool,
     pub seed: Option<u64>,
+    pub online_username: Option<String>,
     pub reset_score: bool,
 }
 
@@ -55,6 +58,9 @@ pub enum CliError {
     MissingSeedValue,
     InvalidSeed(String),
     DuplicateSeed,
+    MissingOnlineUsername,
+    DuplicateOnline,
+    OnlineResetConflict,
     NonUnicodeArgument,
 }
 
@@ -72,6 +78,12 @@ impl fmt::Display for CliError {
                 )
             }
             Self::DuplicateSeed => write!(formatter, "`--seed` may only be specified once"),
+            Self::MissingOnlineUsername => write!(formatter, "`--online` requires a username"),
+            Self::DuplicateOnline => write!(formatter, "`--online` may only be specified once"),
+            Self::OnlineResetConflict => write!(
+                formatter,
+                "`--reset-score` only applies offline and cannot be used with `--online`"
+            ),
             Self::NonUnicodeArgument => {
                 write!(formatter, "command-line arguments must be valid UTF-8")
             }
@@ -122,8 +134,23 @@ where
                         .map_err(|_| CliError::InvalidSeed(value))?,
                 );
             }
+            "--online" => {
+                if options.online_username.is_some() {
+                    return Err(CliError::DuplicateOnline);
+                }
+                let raw_value = args.next().ok_or(CliError::MissingOnlineUsername)?;
+                options.online_username = Some(
+                    raw_value
+                        .into_string()
+                        .map_err(|_| CliError::NonUnicodeArgument)?,
+                );
+            }
             _ => return Err(CliError::UnknownArgument(argument)),
         }
+    }
+
+    if options.online_username.is_some() && options.reset_score {
+        return Err(CliError::OnlineResetConflict);
     }
 
     Ok(CliCommand::Run(options))
@@ -158,14 +185,16 @@ mod tests {
                 "--seed",
                 "18446744073709551615",
                 "--ascii",
-                "--reset-score"
+                "--online",
+                "PlayerOne"
             ]),
             CliOptions {
                 ascii: true,
                 no_color: true,
                 mute: false,
                 seed: Some(u64::MAX),
-                reset_score: true,
+                online_username: Some("PlayerOne".into()),
+                reset_score: false,
             }
         );
     }
@@ -223,6 +252,22 @@ mod tests {
     }
 
     #[test]
+    fn online_requires_one_username_and_cannot_reset_the_offline_score() {
+        assert_eq!(
+            parse_args(["--online"]),
+            Err(CliError::MissingOnlineUsername)
+        );
+        assert_eq!(
+            parse_args(["--online", "one", "--online", "two"]),
+            Err(CliError::DuplicateOnline)
+        );
+        assert_eq!(
+            parse_args(["--reset-score", "--online", "PlayerOne"]),
+            Err(CliError::OnlineResetConflict)
+        );
+    }
+
+    #[test]
     fn repeated_boolean_flags_are_idempotent() {
         assert_eq!(
             run_options(&[
@@ -238,6 +283,7 @@ mod tests {
                 no_color: true,
                 mute: true,
                 seed: None,
+                online_username: None,
                 reset_score: false,
             }
         );
@@ -250,6 +296,7 @@ mod tests {
             "--ascii",
             "--no-color",
             "--seed <u64>",
+            "--online <name>",
             "--reset-score",
             "--help",
             "--version",

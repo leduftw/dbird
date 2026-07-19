@@ -37,6 +37,9 @@ jobs:
           rustup target add ${{ matrix.target }}
       - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }}
+        env:
+          # Configure this repository variable after the Worker is deployed.
+          DBIRD_LEADERBOARD_URL: ${{ vars.DBIRD_LEADERBOARD_URL }}
       - name: Package
         shell: bash
         run: |

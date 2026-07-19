@@ -16,6 +16,7 @@ use crate::game::{
     MIN_FIELD_HEIGHT, MIN_FIELD_WIDTH, Medal, PIPE_SPEED_PER_TICK, PIPE_WIDTH, Phase,
     VIRTUAL_HEIGHT, VIRTUAL_WIDTH,
 };
+use crate::online::{OnlineView, SyncStatus};
 use crate::theme::{ResolvedTheme, ThemeState};
 
 const HORIZONTAL_CHROME: u16 = 2;
@@ -181,6 +182,137 @@ pub fn draw_interpolated(
     draw_header(frame, header, game, best, options, palette);
     draw_field(frame, field, game, best, new_best, render_context);
     draw_footer(frame, footer, game.phase, options, palette);
+}
+
+/// Draw the global leaderboard above the current game frame.
+pub fn draw_leaderboard(frame: &mut Frame<'_>, online: &OnlineView, options: UiOptions) {
+    let screen = frame.area();
+    if screen.is_empty() {
+        return;
+    }
+
+    let palette = Palette::new(options.color, options.theme.resolved());
+    let width = 48.min(screen.width);
+    let own_is_visible = online
+        .entries
+        .iter()
+        .any(|entry| entry.username.eq_ignore_ascii_case(&online.username));
+    let extra_rank_line = usize::from(online.rank.is_some() && !own_is_visible);
+    let available_rows = usize::from(screen.height.saturating_sub(10));
+    let entry_count = online.entries.len().min(10).min(available_rows.max(1));
+    let content_height = 7 + entry_count.max(1) + extra_rank_line;
+    let height = u16::try_from(content_height + 2)
+        .unwrap_or(screen.height)
+        .min(screen.height);
+    let area = centered(screen, width, height);
+    let status_color = match online.status {
+        SyncStatus::Connecting => Palette::CYAN,
+        SyncStatus::Synced => Palette::LIME,
+        SyncStatus::Queued => Palette::YELLOW,
+        SyncStatus::Unavailable => Palette::DANGER,
+    };
+    let block = rounded_block(options)
+        .title(Line::styled(
+            " GLOBAL LEADERBOARD ",
+            palette.fg(Palette::CYAN).add_modifier(Modifier::BOLD),
+        ))
+        .border_style(palette.fg(Palette::CYAN))
+        .style(palette.panel());
+
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled("PLAYER ", palette.fg(Palette::DIM)),
+            Span::styled(
+                online.username.clone(),
+                palette.fg(Palette::MAGENTA).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("   BEST ", palette.fg(Palette::DIM)),
+            Span::styled(
+                format!("{:04}", online.high_score),
+                palette.fg(Palette::YELLOW).add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("CLOUD ", palette.fg(Palette::DIM)),
+            Span::styled(
+                online.status.label(),
+                palette.fg(status_color).add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::styled(
+            truncate_line(
+                online.detail.as_deref().unwrap_or(match online.status {
+                    SyncStatus::Connecting => "Refreshing scores...",
+                    SyncStatus::Synced => "Your best is stored in the cloud.",
+                    SyncStatus::Queued => "Your best will sync when the service is reachable.",
+                    SyncStatus::Unavailable => "Press L to try again.",
+                }),
+                width.saturating_sub(4),
+            ),
+            palette.fg(Palette::DIM),
+        ),
+        Line::from(""),
+        Line::styled(
+            "RANK  USERNAME            SCORE",
+            palette.fg(Palette::TEXT).add_modifier(Modifier::BOLD),
+        ),
+    ];
+
+    if online.entries.is_empty() {
+        lines.push(Line::styled(
+            "No global scores loaded yet.",
+            palette.fg(Palette::DIM),
+        ));
+    } else {
+        lines.extend(online.entries.iter().take(entry_count).map(|entry| {
+            let style = if entry.username.eq_ignore_ascii_case(&online.username) {
+                palette.fg(Palette::LIME).add_modifier(Modifier::BOLD)
+            } else {
+                palette.fg(Palette::TEXT)
+            };
+            Line::styled(
+                format!(
+                    "#{:<4} {:<16} {:>6}",
+                    entry.rank,
+                    truncate_line(&entry.username, 16),
+                    entry.score
+                ),
+                style,
+            )
+        }));
+    }
+
+    if let Some(rank) = online.rank.filter(|_| !own_is_visible) {
+        lines.push(Line::styled(
+            format!("Your global rank: #{rank}"),
+            palette.fg(Palette::LIME).add_modifier(Modifier::BOLD),
+        ));
+    }
+    lines.extend([
+        Line::from(""),
+        Line::styled("L or Esc closes", palette.fg(Palette::DIM)),
+    ]);
+
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(block)
+            .alignment(Alignment::Center),
+        area,
+    );
+}
+
+fn truncate_line(value: &str, width: u16) -> String {
+    let width = usize::from(width);
+    if value.chars().count() <= width {
+        return value.to_owned();
+    }
+    if width <= 3 {
+        return ".".repeat(width);
+    }
+    let mut truncated: String = value.chars().take(width - 3).collect();
+    truncated.push_str("...");
+    truncated
 }
 
 #[derive(Clone, Copy)]
@@ -1604,6 +1736,7 @@ mod tests {
 
     use super::*;
     use crate::game::{BIRD_START_X, FIXED_STEP_SECONDS, Pipe};
+    use crate::online::LeaderboardEntry;
     use crate::theme::ThemeMode;
 
     fn test_options(ascii: bool, mode: ThemeMode) -> UiOptions {
@@ -2524,5 +2657,41 @@ mod tests {
         assert!(!rendered.contains("R reset"));
         assert!(!rendered.contains("LEVEL"));
         assert!(!rendered.contains("SPEED"));
+    }
+
+    #[test]
+    fn online_leaderboard_shows_global_scores_player_rank_and_sync_state() {
+        let backend = TestBackend::new(60, 22);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let online = OnlineView {
+            username: "LocalBird".into(),
+            high_score: 30,
+            rank: Some(12),
+            entries: vec![LeaderboardEntry {
+                rank: 1,
+                username: "WorldBird".into(),
+                score: 99,
+            }],
+            status: SyncStatus::Synced,
+            detail: None,
+        };
+
+        terminal
+            .draw(|frame| draw_leaderboard(frame, &online, UiOptions::default()))
+            .expect("draw leaderboard");
+
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(rendered.contains("GLOBAL LEADERBOARD"));
+        assert!(rendered.contains("LocalBird"));
+        assert!(rendered.contains("WorldBird"));
+        assert!(rendered.contains("SYNCED"));
+        assert!(rendered.contains("Your global rank: #12"));
+        assert!(rendered.contains("L or Esc closes"));
     }
 }

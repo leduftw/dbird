@@ -50,6 +50,7 @@ dbird
 | `Space`, `↑`, `W`, `K`, or `Left Click` | Flap during flight |
 | `P` | Pause or resume |
 | `T` | Cycle System / Light / Dark theme |
+| `L` | Show or refresh the global leaderboard in online mode |
 | `Q`, `Esc`, or `Ctrl-C` | Quit |
 
 Pass through each pipe opening to score. Pipe speed, pipe spacing, opening size, and flight physics stay fixed for the entire run, just like the original game. Scores of 10, 20, 30, and 40 award Bronze, Silver, Gold, and Platinum medals respectively. If the terminal becomes too small, the round is safely suspended; enlarge it and resume when ready.
@@ -58,6 +59,33 @@ Retro-style sound effects accompany flaps, points, collisions, and result transi
 
 The theme starts in System mode on every launch. On macOS and Windows it follows the current light or dark app appearance; press `T` to choose a daytime Light world, a nighttime Dark world, or return to System. The selection lasts for the current run, and `--no-color` remains the final override for terminal colors.
 
+### Offline and online play
+
+Offline is the default and makes no network requests:
+
+```sh
+dbird
+```
+
+Online play is an explicit opt-in. Choose a public username with 3-16 ASCII letters, numbers, `_`, or `-`:
+
+```sh
+dbird --online BirdPlayer
+```
+
+The two modes keep independent best scores. Offline mode continues to use the local high-score file. Online mode uses the cloud score associated with that username; press `L` to see the global top ten and your rank. A private installation credential, the last confirmed cloud score, and any score awaiting retry are kept under dbird's local state directory. If the service is unreachable, gameplay continues and a new best is queued for the next online run.
+
+Connectivity never selects a mode automatically. Internet availability can change during a run, and sending a public username and score should remain a deliberate choice.
+
+The repository includes the Cloudflare Workers + D1 service in [`leaderboard/`](https://github.com/leduftw/dbird/tree/main/leaderboard), but no public endpoint is committed. Until an operator deploys it, set `DBIRD_LEADERBOARD_URL` at runtime for development or at build time for a release:
+
+```sh
+DBIRD_LEADERBOARD_URL=https://dbird-leaderboard.example.workers.dev \
+  cargo run --release -- --online BirdPlayer
+```
+
+See the [leaderboard deployment guide](https://github.com/leduftw/dbird/blob/main/leaderboard/README.md) for local development, deployment, cost notes, and the API's security boundary.
+
 ## Options
 
 ```text
@@ -65,7 +93,8 @@ The theme starts in System mode on every launch. On macOS and Windows it follows
 --no-color       disable the color palette
 --mute           disable sound effects
 --seed <NUMBER>  play the same deterministic course every round
---reset-score    clear the saved high score before starting
+--online <NAME>  opt in to the global leaderboard as this username
+--reset-score    clear the saved offline high score before starting
 -h, --help       show help
 -V, --version    show the version
 ```
@@ -86,6 +115,16 @@ After cloning the repository, run the complete local check suite with:
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test
+```
+
+The leaderboard service has its own checks:
+
+```sh
+cd leaderboard
+npm ci
+npm test
+npx wrangler d1 migrations apply DB --local
+npx wrangler deploy --dry-run
 ```
 
 The physics and seeded pipe generation are independent from terminal rendering, so gameplay behavior can be tested without driving an interactive terminal.

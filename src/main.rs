@@ -11,6 +11,7 @@ use crossterm::event::{
 use dbird::audio::{Audio, Sound};
 use dbird::cli::{self, CliCommand, CliOptions};
 use dbird::game::{DeathCause, Game, Phase};
+use dbird::online::OnlineSession;
 use dbird::signals::ShutdownSignals;
 use dbird::storage::HighScoreStore;
 use dbird::terminal::{TerminalSession, install_panic_hook};
@@ -29,6 +30,15 @@ enum KeyAction {
     Quit,
     Flap,
     Start,
+    CycleTheme,
+    ToggleLeaderboard,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LeaderboardAction {
+    None,
+    Close,
+    Quit,
     CycleTheme,
 }
 
@@ -59,7 +69,15 @@ fn run_game(options: CliOptions) -> Result<(), Box<dyn Error>> {
     if options.reset_score {
         score_store.reset()?;
     }
-    let mut high_score = score_store.load().min(u64::from(u32::MAX)) as u32;
+    let mut online = options
+        .online_username
+        .as_deref()
+        .map(OnlineSession::connect)
+        .transpose()?;
+    let mut high_score = online.as_ref().map_or_else(
+        || score_store.load().min(u64::from(u32::MAX)) as u32,
+        OnlineSession::high_score,
+    );
 
     let shutdown = ShutdownSignals::install()?;
     install_panic_hook();
@@ -84,8 +102,10 @@ fn run_game(options: CliOptions) -> Result<(), Box<dyn Error>> {
     let mut new_best = false;
     let mut unsaved_best = false;
     let mut save_attempted = false;
-    let mut save_warning = None;
+    let mut save_warning: Option<String> = None;
     let mut should_quit = false;
+    let mut leaderboard_visible = false;
+    let mut resume_after_leaderboard = false;
     let mut pending_sounds = VecDeque::new();
 
     while !should_quit {
@@ -94,6 +114,12 @@ fn run_game(options: CliOptions) -> Result<(), Box<dyn Error>> {
         }
 
         let frame_started = Instant::now();
+        if let Some(session) = online.as_mut() {
+            match session.poll() {
+                Ok(online_best) => high_score = high_score.max(online_best),
+                Err(error) => save_warning = Some(error.to_string()),
+            }
+        }
         while pending_sounds
             .front()
             .is_some_and(|(play_at, _)| *play_at <= frame_started)
@@ -154,7 +180,16 @@ fn run_game(options: CliOptions) -> Result<(), Box<dyn Error>> {
 
         if game.phase == Phase::GameOver && unsaved_best && !save_attempted {
             save_attempted = true;
-            match score_store.save(u64::from(high_score)) {
+            let save_result = if let Some(session) = online.as_mut() {
+                session
+                    .submit(high_score)
+                    .map_err(|error| error.to_string())
+            } else {
+                score_store
+                    .save(u64::from(high_score))
+                    .map_err(|error| error.to_string())
+            };
+            match save_result {
                 Ok(()) => unsaved_best = false,
                 Err(error) => save_warning = Some(error),
             }
@@ -170,13 +205,34 @@ fn run_game(options: CliOptions) -> Result<(), Box<dyn Error>> {
                 ui_options,
                 tick_progress,
             );
+            if leaderboard_visible && let Some(session) = online.as_ref() {
+                ui::draw_leaderboard(frame, session.view(), ui_options);
+            }
         })?;
 
         let poll_timeout = RENDER_FRAME_TIME.saturating_sub(frame_started.elapsed());
-        if event::poll(poll_timeout)? {
-            loop {
-                match event::read()? {
-                    Event::Key(key) if key.kind != KeyEventKind::Release => {
+        let mut event_timeout = poll_timeout;
+        while event::poll(event_timeout)? {
+            event_timeout = Duration::ZERO;
+            match event::read()? {
+                Event::Key(key) if key.kind != KeyEventKind::Release => {
+                    if leaderboard_visible {
+                        match handle_leaderboard_key(key) {
+                            LeaderboardAction::Close => {
+                                leaderboard_visible = false;
+                                if resume_after_leaderboard && game.phase == Phase::Paused {
+                                    game.toggle_pause();
+                                }
+                                resume_after_leaderboard = false;
+                            }
+                            LeaderboardAction::Quit => {
+                                should_quit = true;
+                                break;
+                            }
+                            LeaderboardAction::CycleTheme => ui_options.cycle_theme(),
+                            LeaderboardAction::None => {}
+                        }
+                    } else {
                         match handle_key(key, area, fits, &mut game, &mut new_best) {
                             KeyAction::Quit => {
                                 should_quit = true;
@@ -188,26 +244,42 @@ fn run_game(options: CliOptions) -> Result<(), Box<dyn Error>> {
                                 audio.play(Sound::Wing);
                             }
                             KeyAction::CycleTheme => ui_options.cycle_theme(),
+                            KeyAction::ToggleLeaderboard => {
+                                if let Some(session) = online.as_mut() {
+                                    resume_after_leaderboard = game.phase == Phase::Playing;
+                                    if resume_after_leaderboard {
+                                        game.pause();
+                                    }
+                                    session.refresh();
+                                    leaderboard_visible = true;
+                                }
+                            }
                             KeyAction::None => {}
                         }
                     }
-                    Event::Mouse(mouse)
-                        if handle_mouse(mouse, fits, &mut game) == KeyAction::Flap =>
-                    {
-                        audio.play(Sound::Wing);
-                    }
-                    _ => {}
                 }
-
-                if !event::poll(Duration::ZERO)? {
-                    break;
+                Event::Mouse(mouse)
+                    if !leaderboard_visible
+                        && handle_mouse(mouse, fits, &mut game) == KeyAction::Flap =>
+                {
+                    audio.play(Sound::Wing);
                 }
+                _ => {}
             }
         }
     }
 
     if unsaved_best {
-        match score_store.save(u64::from(high_score)) {
+        let save_result = if let Some(session) = online.as_mut() {
+            session
+                .submit(high_score)
+                .map_err(|error| error.to_string())
+        } else {
+            score_store
+                .save(u64::from(high_score))
+                .map_err(|error| error.to_string())
+        };
+        match save_result {
             Ok(()) => save_warning = None,
             Err(error) => save_warning = Some(error),
         }
@@ -216,6 +288,11 @@ fn run_game(options: CliOptions) -> Result<(), Box<dyn Error>> {
     terminal.restore()?;
     if let Some(error) = save_warning {
         eprintln!("dbird: high score could not be saved: {error}");
+    }
+    if let Some(session) = online.as_ref()
+        && session.view().status == dbird::online::SyncStatus::Queued
+    {
+        eprintln!("dbird: high score is queued and will sync on the next online run");
     }
 
     Ok(())
@@ -261,6 +338,16 @@ fn handle_key(
         return KeyAction::CycleTheme;
     }
 
+    if let KeyCode::Char(character) = key.code
+        && character.eq_ignore_ascii_case(&'l')
+        && key.kind == KeyEventKind::Press
+        && !key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+    {
+        return KeyAction::ToggleLeaderboard;
+    }
+
     if !terminal_fits {
         return KeyAction::None;
     }
@@ -285,6 +372,29 @@ fn handle_key(
     }
 
     KeyAction::None
+}
+
+fn handle_leaderboard_key(key: KeyEvent) -> LeaderboardAction {
+    if matches!(key.code, KeyCode::Char('q' | 'Q'))
+        || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
+    {
+        return LeaderboardAction::Quit;
+    }
+    if key.code == KeyCode::Esc
+        || (matches!(key.code, KeyCode::Char(character) if character.eq_ignore_ascii_case(&'l'))
+            && key.kind == KeyEventKind::Press)
+    {
+        return LeaderboardAction::Close;
+    }
+    if matches!(key.code, KeyCode::Char(character) if character.eq_ignore_ascii_case(&'t'))
+        && key.kind == KeyEventKind::Press
+        && !key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+    {
+        return LeaderboardAction::CycleTheme;
+    }
+    LeaderboardAction::None
 }
 
 fn handle_mouse(mouse: MouseEvent, terminal_fits: bool, game: &mut Game) -> KeyAction {
@@ -544,6 +654,73 @@ mod tests {
                 &mut new_best,
             ),
             KeyAction::CycleTheme
+        );
+    }
+
+    #[test]
+    fn leaderboard_key_is_explicit_and_available_without_starting_a_round() {
+        let mut game = Game::new(80, 20, 7);
+        let mut new_best = false;
+        let area = Rect::new(0, 0, 82, 26);
+
+        assert_eq!(
+            handle_key(
+                key(KeyCode::Char('l')),
+                area,
+                true,
+                &mut game,
+                &mut new_best,
+            ),
+            KeyAction::ToggleLeaderboard
+        );
+        assert_eq!(game.phase, Phase::Ready);
+        assert_eq!(
+            handle_key(
+                repeated_key(KeyCode::Char('l')),
+                area,
+                true,
+                &mut game,
+                &mut new_best,
+            ),
+            KeyAction::None
+        );
+        assert_eq!(
+            handle_key(
+                KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL),
+                area,
+                true,
+                &mut game,
+                &mut new_best,
+            ),
+            KeyAction::None
+        );
+    }
+
+    #[test]
+    fn leaderboard_overlay_has_close_quit_and_theme_keys() {
+        assert_eq!(
+            handle_leaderboard_key(key(KeyCode::Esc)),
+            LeaderboardAction::Close
+        );
+        assert_eq!(
+            handle_leaderboard_key(key(KeyCode::Char('L'))),
+            LeaderboardAction::Close
+        );
+        assert_eq!(
+            handle_leaderboard_key(key(KeyCode::Char('q'))),
+            LeaderboardAction::Quit
+        );
+        assert_eq!(
+            handle_leaderboard_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            LeaderboardAction::Quit
+        );
+        assert_eq!(
+            handle_leaderboard_key(key(KeyCode::Char('t'))),
+            LeaderboardAction::CycleTheme
+        );
+        assert_eq!(
+            handle_leaderboard_key(key(KeyCode::Enter)),
+            LeaderboardAction::None
         );
     }
 
