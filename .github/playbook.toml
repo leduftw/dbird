@@ -1,0 +1,30 @@
+# Facts about dbird for leduftw/playbook. Everything else comes from the playbook.
+name = "dbird"
+published = true
+
+[[check]]
+stack = "rust"
+apt = ["libasound2-dev"]
+
+# The leaderboard is a Cloudflare Worker that runs on Linux, so its checks do too.
+[[check]]
+stack = "node"
+dir = "leaderboard"
+os = ["linux"]
+test = [
+  "npm test",
+  "npx wrangler d1 migrations apply DB --local",
+  "npx wrangler deploy --dry-run",
+]
+skip.format = "the leaderboard has no formatter set up yet"
+skip.lint = "the leaderboard has no linter set up yet"
+
+[release]
+stack = "rust"
+apt = ["libasound2-dev"]
+# Lets a release build point at another leaderboard without a code change.
+build-variables = ["DBIRD_LEADERBOARD_URL"]
+channels = ["homebrew", "winget", "installers", "crates-io"]
+
+[release.homebrew]
+desc = "Fully playable terminal recreation of the classic Flappy Bird game"

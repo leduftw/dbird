@@ -30,7 +30,7 @@ Install with a package manager:
 ```sh
 cargo install dbird                 # crates.io, any platform with Rust
 brew install leduftw/tap/dbird      # Homebrew on macOS or Linux
-winget install leduftw.dbird        # Windows (pending winget-pkgs approval)
+winget install leduftw.dbird        # Windows
 ```
 
 Or install the latest development version directly from GitHub:
