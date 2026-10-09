@@ -22,7 +22,7 @@ ureq = { version = "3.3.0", features = ["json"] }
 url = "2.5.8"
 
 [target.'cfg(unix)'.dependencies]
-signal-hook = "0.3.18"
+signal-hook = "0.4.5"
 
 [profile.release]
 codegen-units = 1
