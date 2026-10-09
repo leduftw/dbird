@@ -33,6 +33,9 @@ updates:
         update-types:
           - minor
           - patch
+    # Raise the manifest floor, not just the lockfile, so a fresh install
+    # can't fall back to a version with a known vulnerability.
+    versioning-strategy: increase
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
