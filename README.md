@@ -13,7 +13,9 @@ The minimum terminal size is 36 columns by 20 rows. A window at least 36 rows ta
 
 ### Download a prebuilt binary
 
-Every release ships executables for macOS (Apple Silicon and Intel), Linux (x86_64 and arm64), and Windows (x86_64). Grab the archive for your platform from the [latest release](https://github.com/leduftw/dbird/releases/latest), extract it, and run `dbird` from a terminal — no Rust toolchain required. On Linux, audio uses ALSA (`libasound2`), which desktop distributions ship by default. If macOS Gatekeeper blocks a browser-downloaded binary, clear the quarantine flag with `xattr -d com.apple.quarantine dbird`.
+Every release ships executables for macOS, Linux and Windows, each for both Arm and Intel/AMD chips, with stable names such as `dbird-macos-arm64.zip` or `dbird-linux-x64.tar.gz`. Grab the archive for your platform from the [latest release](https://github.com/leduftw/dbird/releases/latest), extract it, and run `dbird` from a terminal — no Rust toolchain required. On Linux, audio uses ALSA (`libasound2`), which desktop distributions ship by default. If macOS Gatekeeper blocks a browser-downloaded binary, clear the quarantine flag with `xattr -d com.apple.quarantine dbird`.
+
+Each release also lists every file's checksum in `SHA256SUMS` and carries a signed record of how it was built, which `gh attestation verify <file> --repo leduftw/dbird` checks.
 
 ### Run from source
 
@@ -32,6 +34,20 @@ cargo install dbird                 # crates.io, any platform with Rust
 brew install leduftw/tap/dbird      # Homebrew on macOS or Linux
 winget install leduftw.dbird        # Windows
 ```
+
+Each release is submitted to Microsoft's moderated WinGet repository, so a new version can take a while to appear there.
+
+Or use the one-line installer, which picks the build for your machine, checks it against the release's `SHA256SUMS` and installs it without `sudo`:
+
+```sh
+curl -fsSL https://github.com/leduftw/dbird/releases/latest/download/dbird-installer.sh | sh
+```
+
+```powershell
+irm https://github.com/leduftw/dbird/releases/latest/download/dbird-installer.ps1 | iex
+```
+
+Set `DBIRD_VERSION` to install a specific version or `DBIRD_INSTALL_DIR` to choose the destination. If the destination isn't on `PATH`, the installer prints the line to add.
 
 Or install the latest development version directly from GitHub:
 
