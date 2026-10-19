@@ -15,7 +15,7 @@ exclude = [".github/", ".githooks/", ".gitignore", "AGENTS.md", "CLAUDE.md", "le
 crossterm = "0.29.0"
 getrandom = "0.4.3"
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }
-rodio = { version = "0.22.2", default-features = false, features = ["playback", "vorbis"] }
+rodio = { version = "0.23.0", default-features = false, features = ["playback", "vorbis"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 ureq = { version = "3.3.0", features = ["json"] }
