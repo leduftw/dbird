@@ -1,5 +1,7 @@
 use std::collections::VecDeque;
+use std::env;
 use std::error::Error;
+use std::ffi::OsString;
 use std::io::{self, IsTerminal, Write};
 use std::process::ExitCode;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -17,6 +19,7 @@ use dbird::storage::HighScoreStore;
 use dbird::terminal::{TerminalSession, install_panic_hook};
 use dbird::theme::ThemeState;
 use dbird::ui::{self, UiOptions};
+use dbird::update;
 use ratatui::layout::Rect;
 
 // Preserve the original 60 Hz mechanics while sampling motion at 120 Hz.
@@ -43,7 +46,23 @@ enum LeaderboardAction {
 }
 
 fn main() -> ExitCode {
-    match run() {
+    let arguments: Vec<OsString> = env::args_os().skip(1).collect();
+    let no_color = cli::no_color_requested(&arguments);
+    let command = match cli::parse_args(arguments.iter().cloned()) {
+        Ok(command) => command,
+        Err(stop) => return cli::report(&stop, no_color),
+    };
+    let result = match command {
+        CliCommand::Update => return update::run(),
+        CliCommand::Version => write_stdout(&format!("{}\n", cli::version_text())),
+        // Only a bare `dbird` falls back to its help. WinGet's validation
+        // starts every new version that way, without a terminal.
+        CliCommand::Run(_) if arguments.is_empty() && !interactive_terminal() => {
+            print_help_without_terminal(no_color)
+        }
+        CliCommand::Run(options) => run_game(options),
+    };
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("dbird: {error}");
@@ -52,16 +71,19 @@ fn main() -> ExitCode {
     }
 }
 
-fn run() -> Result<(), Box<dyn Error>> {
-    match cli::parse_env()? {
-        CliCommand::Help => write_stdout(cli::HELP_TEXT),
-        CliCommand::Version => write_stdout(&format!("{}\n", cli::version_text())),
-        CliCommand::Run(options) => run_game(options),
-    }
+fn interactive_terminal() -> bool {
+    io::stdin().is_terminal() && io::stdout().is_terminal()
+}
+
+fn print_help_without_terminal(no_color: bool) -> Result<(), Box<dyn Error>> {
+    let mut stdout = io::stdout();
+    let terminal = stdout.is_terminal();
+    cli::write_styled(&mut stdout, &cli::help(), terminal, no_color)?;
+    write_stdout("\ndbird needs an interactive terminal to play.\n")
 }
 
 fn run_game(options: CliOptions) -> Result<(), Box<dyn Error>> {
-    if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+    if !interactive_terminal() {
         return Err(io::Error::other("an interactive terminal is required").into());
     }
 
@@ -92,7 +114,7 @@ fn run_game(options: CliOptions) -> Result<(), Box<dyn Error>> {
     }
     let mut ui_options = UiOptions {
         ascii: options.ascii,
-        color: !options.no_color,
+        color: !options.no_color && !cli::no_color_variable(),
         theme: ThemeState::default(),
     };
 

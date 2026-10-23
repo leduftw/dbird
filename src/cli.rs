@@ -1,36 +1,43 @@
-//! Minimal dependency-free command-line parsing.
+//! Command-line parsing with clap, and help in the playbook's colors.
+//!
+//! clap parses everything, including `-h`, `--help`, `help [<command>]` and
+//! `-V`/`--version`. Only the help text is drawn here, from clap's own
+//! definitions: the playbook copies the palette of Python 3.14's argparse,
+//! which colors short and long options differently, and clap styles them alike.
 
 use std::env;
 use std::ffi::OsString;
-use std::fmt;
+use std::fmt::Write as _;
+use std::io::{self, IsTerminal, Write};
+use std::process::ExitCode;
 
-/// One-line syntax suitable for parse-error output.
-pub const USAGE: &str = "Usage: dbird [OPTIONS]";
+use clap::builder::StyledStr;
+use clap::builder::styling::{AnsiColor, Style, Styles};
+use clap::error::ErrorKind;
+use clap::{Arg, Command, CommandFactory, FromArgMatches, Parser, Subcommand};
 
-/// Full command-line help.
-pub const HELP_TEXT: &str = "\
-dbird - a terminal recreation of the classic Flappy Bird game
+/// The repo's GitHub description: dbird's help and its repo describe it alike.
+pub const DESCRIPTION: &str =
+    "a fully playable terminal recreation of the classic Flappy Bird game";
 
-Usage: dbird [OPTIONS]
+/// The game's controls, listed after the options in dbird's help.
+const CONTROLS: [(&str, &str); 6] = [
+    ("Enter", "Start / retry"),
+    ("Space, Up, W, K, or Click", "Flap during flight"),
+    ("P", "Pause / resume"),
+    ("T", "Cycle System / Light / Dark theme"),
+    ("L", "Show the global leaderboard (online only)"),
+    ("Q, Esc, or Ctrl-C", "Quit"),
+];
 
-Controls:
-  Enter                        Start / retry
-  Space, Up, W, K, or Click    Flap during flight
-  P                            Pause / resume
-  T                            Cycle System / Light / Dark theme
-  L                            Show the global leaderboard (online only)
-  Q, Esc, or Ctrl-C            Quit
-
-Options:
-      --ascii          Use ASCII-only graphics
-      --no-color       Disable colored output
-      --mute           Disable sound effects
-      --seed <u64>     Play the same deterministic course every round
-      --online <name>  Opt in to the global leaderboard as this username
-      --reset-score    Reset the saved offline high score before starting
-  -h, --help           Print help
-  -V, --version        Print version
-";
+// Python 3.14 argparse's palette. Inside the usage line, values lose the bold.
+const HEADING: Style = AnsiColor::Blue.on_default().bold();
+const PROGRAM: Style = AnsiColor::Magenta.on_default().bold();
+const COMMAND: Style = AnsiColor::Green.on_default().bold();
+const SHORT: Style = AnsiColor::Green.on_default().bold();
+const LONG: Style = AnsiColor::Cyan.on_default().bold();
+const VALUE: Style = AnsiColor::Yellow.on_default().bold();
+const USAGE_VALUE: Style = AnsiColor::Yellow.on_default();
 
 /// Options used for a normal game run.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -43,122 +50,321 @@ pub struct CliOptions {
     pub reset_score: bool,
 }
 
-/// The action selected by command-line parsing.
+/// What the command line asks dbird to do.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CliCommand {
     Run(CliOptions),
-    Help,
+    Update,
     Version,
 }
 
-/// A command-line parse failure.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum CliError {
-    UnknownArgument(String),
-    MissingSeedValue,
-    InvalidSeed(String),
-    DuplicateSeed,
-    MissingOnlineUsername,
-    DuplicateOnline,
-    OnlineResetConflict,
-    NonUnicodeArgument,
+#[derive(Debug, Parser)]
+#[command(
+    name = "dbird",
+    version,
+    about = DESCRIPTION,
+    args_conflicts_with_subcommands = true,
+    styles = clap_styles(),
+)]
+struct Arguments {
+    /// Use ASCII-only graphics
+    #[arg(long, overrides_with = "ascii")]
+    ascii: bool,
+    /// Disable colored output
+    #[arg(long, global = true, overrides_with = "no_color")]
+    no_color: bool,
+    /// Disable sound effects
+    #[arg(long, overrides_with = "mute")]
+    mute: bool,
+    /// Play the same deterministic course every round
+    #[arg(long, value_name = "NUMBER")]
+    seed: Option<u64>,
+    /// Opt in to the global leaderboard as this username
+    #[arg(long, value_name = "NAME", conflicts_with = "reset_score")]
+    online: Option<String>,
+    /// Reset the saved offline high score before starting
+    #[arg(long, overrides_with = "reset_score")]
+    reset_score: bool,
+    #[command(subcommand)]
+    command: Option<Subcommands>,
 }
 
-impl fmt::Display for CliError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::UnknownArgument(argument) => {
-                write!(formatter, "unknown argument `{argument}` (try `--help`)")
-            }
-            Self::MissingSeedValue => write!(formatter, "`--seed` requires a u64 value"),
-            Self::InvalidSeed(value) => {
-                write!(
-                    formatter,
-                    "invalid seed `{value}`: expected an unsigned 64-bit integer"
-                )
-            }
-            Self::DuplicateSeed => write!(formatter, "`--seed` may only be specified once"),
-            Self::MissingOnlineUsername => write!(formatter, "`--online` requires a username"),
-            Self::DuplicateOnline => write!(formatter, "`--online` may only be specified once"),
-            Self::OnlineResetConflict => write!(
-                formatter,
-                "`--reset-score` only applies offline and cannot be used with `--online`"
-            ),
-            Self::NonUnicodeArgument => {
-                write!(formatter, "command-line arguments must be valid UTF-8")
-            }
-        }
+#[derive(Debug, Subcommand)]
+enum Subcommands {
+    /// Update dbird to the latest release
+    #[command(alias = "upgrade")]
+    Update,
+    /// Print the version
+    Version,
+}
+
+/// clap's own styles, which reach the usage line and its error messages.
+fn clap_styles() -> Styles {
+    Styles::styled()
+        .header(HEADING)
+        .usage(HEADING)
+        .literal(PROGRAM)
+        .placeholder(USAGE_VALUE)
+}
+
+/// dbird's command line, with every command's help drawn by [`render_help`].
+pub fn command() -> Command {
+    let mut command = Arguments::command();
+    // Building adds clap's `-h`/`--help`, `-V`/`--version` and `help` command,
+    // so the help drawn below lists them too.
+    command.build();
+    let subcommands: Vec<String> = command
+        .get_subcommands()
+        .map(|subcommand| subcommand.get_name().to_owned())
+        .collect();
+    let help = render_help(&command, true);
+    let mut command = command.help_template("{before-help}").before_help(help);
+    for name in subcommands {
+        command = command.mut_subcommand(name, |subcommand| {
+            let help = render_help(&subcommand, false);
+            subcommand.help_template("{before-help}").before_help(help)
+        });
     }
+    command
 }
 
-impl std::error::Error for CliError {}
+/// dbird's help, as `dbird --help` prints it.
+pub fn help() -> StyledStr {
+    command().render_help()
+}
 
 /// Parses options supplied to the current process.
-pub fn parse_env() -> Result<CliCommand, CliError> {
+pub fn parse_env() -> Result<CliCommand, clap::Error> {
     parse_args(env::args_os().skip(1))
 }
 
 /// Parses an iterator of command-line options (excluding the executable name).
-pub fn parse_args<I, S>(args: I) -> Result<CliCommand, CliError>
+pub fn parse_args<I, S>(args: I) -> Result<CliCommand, clap::Error>
 where
     I: IntoIterator<Item = S>,
     S: Into<OsString>,
 {
-    let mut options = CliOptions::default();
-    let mut args = args.into_iter().map(Into::into);
+    let arguments =
+        std::iter::once(OsString::from("dbird")).chain(args.into_iter().map(Into::into));
+    let mut matches = command().try_get_matches_from(arguments)?;
+    let arguments = Arguments::from_arg_matches_mut(&mut matches)?;
+    Ok(match arguments.command {
+        Some(Subcommands::Update) => CliCommand::Update,
+        Some(Subcommands::Version) => CliCommand::Version,
+        None => CliCommand::Run(CliOptions {
+            ascii: arguments.ascii,
+            no_color: arguments.no_color,
+            mute: arguments.mute,
+            seed: arguments.seed,
+            online_username: arguments.online,
+            reset_score: arguments.reset_score,
+        }),
+    })
+}
 
-    while let Some(raw_argument) = args.next() {
-        let argument = raw_argument
-            .into_string()
-            .map_err(|_| CliError::NonUnicodeArgument)?;
+/// Whether `--no-color` appears anywhere, read before clap so it also governs
+/// the help clap prints the moment it reaches `-h`.
+pub fn no_color_requested<S: AsRef<std::ffi::OsStr>>(args: &[S]) -> bool {
+    args.iter()
+        .any(|argument| argument.as_ref() == "--no-color")
+}
 
-        match argument.as_str() {
-            "--ascii" => options.ascii = true,
-            "--no-color" => options.no_color = true,
-            "--mute" => options.mute = true,
-            "--reset-score" => options.reset_score = true,
-            "-h" | "--help" => return Ok(CliCommand::Help),
-            "-V" | "--version" => return Ok(CliCommand::Version),
-            "--seed" => {
-                if options.seed.is_some() {
-                    return Err(CliError::DuplicateSeed);
-                }
+/// Whether the `NO_COLOR` variable asks for plain output (set and not empty).
+pub fn no_color_variable() -> bool {
+    env::var_os("NO_COLOR").is_some_and(|value| !value.is_empty())
+}
 
-                let raw_value = args.next().ok_or(CliError::MissingSeedValue)?;
-                let value = raw_value
-                    .into_string()
-                    .map_err(|_| CliError::NonUnicodeArgument)?;
-                options.seed = Some(
-                    value
-                        .parse::<u64>()
-                        .map_err(|_| CliError::InvalidSeed(value))?,
-                );
-            }
-            "--online" => {
-                if options.online_username.is_some() {
-                    return Err(CliError::DuplicateOnline);
-                }
-                let raw_value = args.next().ok_or(CliError::MissingOnlineUsername)?;
-                options.online_username = Some(
-                    raw_value
-                        .into_string()
-                        .map_err(|_| CliError::NonUnicodeArgument)?,
-                );
-            }
-            _ => return Err(CliError::UnknownArgument(argument)),
-        }
+/// Colors only reach a terminal, and `--no-color`, `NO_COLOR` or `TERM=dumb`
+/// turn them off.
+pub fn colors_allowed(terminal: bool, no_color: bool) -> bool {
+    terminal
+        && !no_color
+        && !no_color_variable()
+        && env::var_os("TERM").is_none_or(|term| term != "dumb")
+}
+
+/// Prints what clap stopped at: help or the version to stdout with exit 0, or
+/// a mistake to stderr with exit 2.
+pub fn report(error: &clap::Error, no_color: bool) -> ExitCode {
+    let text = error.render();
+    let shown = if matches!(
+        error.kind(),
+        ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
+    ) {
+        write_styled(
+            &mut io::stdout(),
+            &text,
+            io::stdout().is_terminal(),
+            no_color,
+        )
+    } else {
+        write_styled(
+            &mut io::stderr(),
+            &text,
+            io::stderr().is_terminal(),
+            no_color,
+        )
+    };
+    match shown {
+        Ok(()) => ExitCode::from(error.exit_code().clamp(0, 255) as u8),
+        Err(_) => ExitCode::FAILURE,
     }
+}
 
-    if options.online_username.is_some() && options.reset_score {
-        return Err(CliError::OnlineResetConflict);
+/// Writes styled text, keeping its colors only where [`colors_allowed`] says.
+pub fn write_styled(
+    output: &mut impl Write,
+    text: &StyledStr,
+    terminal: bool,
+    no_color: bool,
+) -> io::Result<()> {
+    let written = if colors_allowed(terminal, no_color) {
+        write!(output, "{}", text.ansi())
+    } else {
+        write!(output, "{text}")
+    };
+    match written.and_then(|()| output.flush()) {
+        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Ok(()),
+        result => result,
     }
-
-    Ok(CliCommand::Run(options))
 }
 
 /// Returns the version line printed for `--version`.
 pub fn version_text() -> String {
     format!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"))
+}
+
+/// Draws a command's help in clap's layout and argparse's colors.
+fn render_help(command: &Command, controls: bool) -> StyledStr {
+    let mut help = StyledStr::new();
+    if let Some(about) = command.get_about() {
+        let _ = write!(help, "{about}\n\n");
+    }
+    let _ = write!(help, "{}", command.clone().render_usage().ansi());
+
+    let commands: Vec<Row> = command
+        .get_subcommands()
+        .filter(|subcommand| !subcommand.is_hide_set())
+        .map(|subcommand| {
+            let name = subcommand.get_name();
+            let about = subcommand
+                .get_about()
+                .map(ToString::to_string)
+                .unwrap_or_default();
+            Row::new(format!("{COMMAND}{name}{COMMAND:#}"), name.len(), about)
+        })
+        .collect();
+    write_section(&mut help, "Commands", &commands);
+
+    let visible = |arg: &&Arg| !arg.is_hide_set();
+    let arguments: Vec<Row> = command
+        .get_positionals()
+        .filter(visible)
+        .map(|arg| {
+            let name = value_names(arg).join(" ");
+            let (open, close) = if arg.is_required_set() {
+                ("<", ">")
+            } else {
+                ("[", "]")
+            };
+            let repeated = if arg
+                .get_num_args()
+                .is_some_and(|count| count.max_values() > 1)
+            {
+                "..."
+            } else {
+                ""
+            };
+            let width = name.len() + 2 + repeated.len();
+            let spec = format!("{COMMAND}{open}{name}{close}{repeated}{COMMAND:#}");
+            Row::new(spec, width, help_text(arg))
+        })
+        .collect();
+    write_section(&mut help, "Arguments", &arguments);
+
+    // In the order clap keeps them: dbird's own options, then help and version.
+    let options: Vec<Row> = command
+        .get_arguments()
+        .filter(|arg| !arg.is_positional())
+        .filter(visible)
+        .map(option_row)
+        .collect();
+    write_section(&mut help, "Options", &options);
+
+    if controls {
+        let rows: Vec<Row> = CONTROLS
+            .iter()
+            .map(|(keys, action)| Row::new((*keys).to_owned(), keys.len(), (*action).to_owned()))
+            .collect();
+        write_section(&mut help, "Controls", &rows);
+    }
+    help
+}
+
+/// One line of a help section: a styled name, its width on screen, and its help.
+struct Row {
+    spec: String,
+    width: usize,
+    text: String,
+}
+
+impl Row {
+    fn new(spec: String, width: usize, text: String) -> Self {
+        Self { spec, width, text }
+    }
+}
+
+fn option_row(arg: &Arg) -> Row {
+    let mut spec = String::new();
+    let mut width = 0;
+    match arg.get_short() {
+        Some(short) => {
+            let _ = write!(spec, "{SHORT}-{short}{SHORT:#}");
+            width += 2;
+            if arg.get_long().is_some() {
+                spec.push_str(", ");
+                width += 2;
+            }
+        }
+        None => {
+            spec.push_str("    ");
+            width += 4;
+        }
+    }
+    if let Some(long) = arg.get_long() {
+        let _ = write!(spec, "{LONG}--{long}{LONG:#}");
+        width += 2 + long.len();
+    }
+    if arg.get_action().takes_values() {
+        for name in value_names(arg) {
+            let _ = write!(spec, " {VALUE}<{name}>{VALUE:#}");
+            width += 3 + name.len();
+        }
+    }
+    Row::new(spec, width, help_text(arg))
+}
+
+fn value_names(arg: &Arg) -> Vec<String> {
+    match arg.get_value_names() {
+        Some(names) => names.iter().map(ToString::to_string).collect(),
+        None => vec![arg.get_id().as_str().to_uppercase()],
+    }
+}
+
+fn help_text(arg: &Arg) -> String {
+    arg.get_help().map(ToString::to_string).unwrap_or_default()
+}
+
+fn write_section(help: &mut StyledStr, heading: &str, rows: &[Row]) {
+    if rows.is_empty() {
+        return;
+    }
+    let width = rows.iter().map(|row| row.width).max().unwrap_or(0);
+    let _ = write!(help, "\n\n{HEADING}{heading}:{HEADING:#}");
+    for row in rows {
+        let padding = " ".repeat(width - row.width);
+        let _ = write!(help, "\n  {}{padding}  {}", row.spec, row.text);
+    }
 }
 
 #[cfg(test)]
@@ -170,6 +376,16 @@ mod tests {
             CliCommand::Run(options) => options,
             command => panic!("expected a run command, got {command:?}"),
         }
+    }
+
+    fn stop(arguments: &[&str]) -> clap::Error {
+        parse_args(arguments.iter().copied()).expect_err("clap should stop before running")
+    }
+
+    /// What the user sees for this command line when output isn't a terminal.
+    fn shown(arguments: &[&str]) -> (String, i32) {
+        let error = stop(arguments);
+        (error.render().to_string(), error.exit_code())
     }
 
     #[test]
@@ -200,71 +416,127 @@ mod tests {
     }
 
     #[test]
+    fn values_can_follow_an_equals_sign() {
+        let options = run_options(&["--seed=5", "--online=PlayerOne"]);
+        assert_eq!(options.seed, Some(5));
+        assert_eq!(options.online_username.as_deref(), Some("PlayerOne"));
+    }
+
+    #[test]
     fn zero_is_a_valid_seed() {
         assert_eq!(run_options(&["--seed", "0"]).seed, Some(0));
     }
 
     #[test]
-    fn recognizes_both_help_spellings() {
-        assert_eq!(parse_args(["-h"]), Ok(CliCommand::Help));
-        assert_eq!(parse_args(["--help"]), Ok(CliCommand::Help));
-    }
-
-    #[test]
-    fn recognizes_both_version_spellings() {
-        assert_eq!(parse_args(["-V"]), Ok(CliCommand::Version));
-        assert_eq!(parse_args(["--version"]), Ok(CliCommand::Version));
-    }
-
-    #[test]
-    fn rejects_unknown_options_and_positionals() {
+    fn subcommands_and_the_upgrade_alias() {
+        assert_eq!(parse_args(["update"]).unwrap(), CliCommand::Update);
+        assert_eq!(parse_args(["upgrade"]).unwrap(), CliCommand::Update);
+        assert_eq!(parse_args(["version"]).unwrap(), CliCommand::Version);
         assert_eq!(
-            parse_args(["--colour"]),
-            Err(CliError::UnknownArgument("--colour".into()))
-        );
-        assert_eq!(
-            parse_args(["fly-now"]),
-            Err(CliError::UnknownArgument("fly-now".into()))
+            parse_args(["update", "--no-color"]).unwrap(),
+            CliCommand::Update
         );
     }
 
     #[test]
-    fn rejects_a_missing_seed_value() {
-        assert_eq!(parse_args(["--seed"]), Err(CliError::MissingSeedValue));
+    fn help_flags_and_the_help_command_print_the_same_help() {
+        let (expected, code) = shown(&["--help"]);
+        assert_eq!(code, 0);
+        assert_eq!(expected, help().to_string());
+        for arguments in [&["-h"][..], &["help"], &["--no-color", "-h"]] {
+            assert_eq!(shown(arguments), (expected.clone(), 0), "{arguments:?}");
+        }
     }
 
     #[test]
-    fn rejects_bad_or_out_of_range_seeds() {
-        for seed in ["bird", "-1", "1.5", "18446744073709551616"] {
+    fn help_of_one_command() {
+        let (expected, code) = shown(&["update", "--help"]);
+        assert_eq!(code, 0);
+        assert!(expected.starts_with("Update dbird to the latest release\n\nUsage: dbird update"));
+        assert_eq!(shown(&["help", "update"]), (expected.clone(), 0));
+        assert_eq!(shown(&["update", "-h"]), (expected, 0));
+    }
+
+    #[test]
+    fn help_describes_dbird_and_lists_everything_once() {
+        let help = help().to_string();
+        assert!(help.starts_with(&format!("{DESCRIPTION}\n\nUsage: dbird [OPTIONS]\n")));
+        for line in [
+            "  update   Update dbird to the latest release",
+            "  version  Print the version",
+            "      --seed <NUMBER>  Play the same deterministic course every round",
+            "      --online <NAME>  Opt in to the global leaderboard as this username",
+            "  -h, --help           Print help",
+            "  -V, --version        Print version",
+            "  Space, Up, W, K, or Click  Flap during flight",
+        ] {
             assert_eq!(
-                parse_args(["--seed", seed]),
-                Err(CliError::InvalidSeed(seed.into()))
+                help.lines().filter(|shown| *shown == line).count(),
+                1,
+                "{line:?} in\n{help}"
+            );
+        }
+        for option in ["--ascii", "--no-color", "--mute", "--reset-score"] {
+            assert_eq!(help.matches(option).count(), 1, "{option} in\n{help}");
+        }
+        assert!(!help.contains("upgrade"), "the alias stays out of the help");
+    }
+
+    #[test]
+    fn help_uses_argparse_colors() {
+        let help = help().ansi().to_string();
+        let heading = HEADING.render();
+        let program = PROGRAM.render();
+        for piece in [
+            format!("{heading}Usage:"),
+            format!("{program}dbird{}", PROGRAM.render_reset()),
+            format!("{heading}Commands:"),
+            format!("{}update", COMMAND.render()),
+            format!("{}-h", SHORT.render()),
+            format!("{}--help", LONG.render()),
+            format!("{}<NUMBER>", VALUE.render()),
+            format!("{}[OPTIONS]", USAGE_VALUE.render()),
+        ] {
+            assert!(help.contains(&piece), "{piece:?} missing from\n{help:?}");
+        }
+    }
+
+    #[test]
+    fn version_flags_print_the_name_and_version() {
+        for arguments in [&["-V"][..], &["--version"]] {
+            assert_eq!(
+                shown(arguments),
+                (format!("{}\n", version_text()), 0),
+                "{arguments:?}"
             );
         }
     }
 
     #[test]
-    fn rejects_duplicate_seed_options() {
-        assert_eq!(
-            parse_args(["--seed", "1", "--seed", "2"]),
-            Err(CliError::DuplicateSeed)
-        );
-    }
-
-    #[test]
-    fn online_requires_one_username_and_cannot_reset_the_offline_score() {
-        assert_eq!(
-            parse_args(["--online"]),
-            Err(CliError::MissingOnlineUsername)
-        );
-        assert_eq!(
-            parse_args(["--online", "one", "--online", "two"]),
-            Err(CliError::DuplicateOnline)
-        );
-        assert_eq!(
-            parse_args(["--reset-score", "--online", "PlayerOne"]),
-            Err(CliError::OnlineResetConflict)
-        );
+    fn mistakes_exit_2() {
+        for arguments in [
+            &["--colour"][..],
+            &["fly-now"],
+            &["--seed"],
+            &["--seed", "bird"],
+            &["--seed", "-1"],
+            &["--seed", "1.5"],
+            &["--seed", "18446744073709551616"],
+            &["--seed", "1", "--seed", "2"],
+            &["--online"],
+            &["--online", "one", "--online", "two"],
+            &["--reset-score", "--online", "PlayerOne"],
+            &["--seed", "1", "update"],
+            &["update", "--mute"],
+            &["help", "fly-now"],
+        ] {
+            let error = stop(arguments);
+            assert_eq!(error.exit_code(), 2, "{arguments:?}: {error}");
+            assert!(
+                error.to_string().contains("--help"),
+                "{arguments:?} points at --help"
+            );
+        }
     }
 
     #[test]
@@ -290,35 +562,25 @@ mod tests {
     }
 
     #[test]
-    fn help_and_usage_document_every_option() {
-        assert!(HELP_TEXT.contains(USAGE));
-        for option in [
-            "--ascii",
-            "--no-color",
-            "--seed <u64>",
-            "--online <name>",
-            "--reset-score",
-            "--help",
-            "--version",
-        ] {
-            assert!(HELP_TEXT.contains(option), "help omitted {option}");
-        }
-        for control in ["Enter", "Flap during flight", "Cycle System / Light / Dark"] {
-            assert!(HELP_TEXT.contains(control), "help omitted {control}");
-        }
+    fn no_color_is_found_anywhere() {
+        assert!(no_color_requested(&["update", "--no-color"]));
+        assert!(no_color_requested(&["--no-color", "-h"]));
+        assert!(!no_color_requested(&["--ascii"]));
     }
 
     #[test]
-    fn errors_are_clear_and_actionable() {
-        assert_eq!(
-            CliError::MissingSeedValue.to_string(),
-            "`--seed` requires a u64 value"
-        );
-        assert!(
-            CliError::UnknownArgument("--wat".into())
-                .to_string()
-                .contains("--help")
-        );
+    fn colors_only_reach_a_terminal_without_no_color() {
+        assert!(!colors_allowed(false, false));
+        assert!(!colors_allowed(true, true));
+    }
+
+    #[test]
+    fn plain_output_has_no_escape_codes() {
+        let mut output = Vec::new();
+        write_styled(&mut output, &help(), false, false).unwrap();
+        let text = String::from_utf8(output).unwrap();
+        assert!(!text.contains('\x1b'));
+        assert_eq!(text, help().to_string());
     }
 
     #[test]
@@ -332,6 +594,6 @@ mod tests {
         use std::os::unix::ffi::OsStringExt;
 
         let argument = OsString::from_vec(vec![0xff]);
-        assert_eq!(parse_args([argument]), Err(CliError::NonUnicodeArgument));
+        assert_eq!(parse_args([argument]).unwrap_err().exit_code(), 2);
     }
 }
