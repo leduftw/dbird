@@ -30,6 +30,8 @@ Deploying the leaderboard is still manual (`npm run deploy` after `npx wrangler 
 - `src/online.rs` talks to the leaderboard. Its address is built in, and the
   `DBIRD_LEADERBOARD_URL` variable overrides it at run time or at build time.
 - `src/storage.rs` keeps scores and online state outside the repository.
+- `src/cli.rs` parses the command line with clap and draws its help in the
+  playbook's colors; `src/update.rs` is `dbird update`.
 - `assets/sounds/generate.py` synthesizes every sound effect; there are no
   third-party samples.
 

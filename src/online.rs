@@ -132,6 +132,12 @@ impl Username {
     }
 }
 
+/// Checks a CLI username with the same rules as the profile and server data,
+/// before any terminal, filesystem or network work starts.
+pub(crate) fn parse_username(value: &str) -> Result<String, OnlineError> {
+    Username::parse(value).map(|username| username.display)
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct StoredProfile {
     version: u8,

@@ -56,6 +56,14 @@ cargo install --locked --git https://github.com/leduftw/dbird.git
 dbird
 ```
 
+### Update
+
+```sh
+dbird update                        # or: dbird upgrade
+```
+
+`dbird update` checks for a newer release and installs it the same way dbird was installed: `brew upgrade leduftw/tap/dbird` for Homebrew, `winget upgrade --id leduftw.dbird` for WinGet, `cargo install dbird --locked` for Cargo, and the one-line installer again, into the same folder, for everything else. A new version reaches WinGet only after Microsoft's review, so until it does, `dbird update` says the release isn't on WinGet yet. A binary built with `cargo build` isn't updated this way; pull and rebuild it instead.
+
 ## Play
 
 ### Controls
@@ -105,15 +113,26 @@ See the [leaderboard deployment guide](https://github.com/leduftw/dbird/blob/mai
 ## Options
 
 ```text
---ascii          use plain ASCII graphics
---no-color       disable the color palette
---mute           disable sound effects
---seed <NUMBER>  play the same deterministic course every round
---online <NAME>  opt in to the global leaderboard as this username
---reset-score    clear the saved offline high score before starting
--h, --help       show help
--V, --version    show the version
+Usage: dbird [OPTIONS]
+       dbird <COMMAND>
+
+Commands:
+  update   Update dbird to the latest release
+  version  Print the version
+  help     Print this message or the help of the given subcommand(s)
+
+Options:
+      --ascii          Use ASCII-only graphics
+      --no-color       Disable colored output
+      --mute           Disable sound effects
+      --seed <NUMBER>  Play the same deterministic course every round
+      --online <NAME>  Opt in to the global leaderboard as this username
+      --reset-score    Reset the saved offline high score before starting
+  -h, --help           Print help
+  -V, --version        Print version
 ```
+
+The `NO_COLOR` variable turns colors off just like `--no-color`, in the game and in the help. Help is colored only in a terminal, and `TERM=dumb` also turns its colors off. Started without an interactive terminal, a bare `dbird` prints its help instead of a game and exits 0. An explicit game option, such as `dbird --mute`, still requires a terminal and exits 1 without one.
 
 High scores are stored outside the repository. On macOS the default is:
 
