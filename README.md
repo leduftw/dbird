@@ -132,7 +132,7 @@ Options:
   -V, --version        Print version
 ```
 
-The `NO_COLOR` variable turns colors off just like `--no-color`, in the game and in the help. Started without an interactive terminal, a bare `dbird` prints its help instead of a game and exits 0.
+The `NO_COLOR` variable turns colors off just like `--no-color`, in the game and in the help. Help is colored only in a terminal, and `TERM=dumb` also turns its colors off. Started without an interactive terminal, a bare `dbird` prints its help instead of a game and exits 0. An explicit game option, such as `dbird --mute`, still requires a terminal and exits 1 without one.
 
 High scores are stored outside the repository. On macOS the default is:
 

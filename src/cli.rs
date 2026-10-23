@@ -1,9 +1,10 @@
 //! Command-line parsing with clap, and help in the playbook's colors.
 //!
-//! clap parses everything, including `-h`, `--help`, `help [<command>]` and
-//! `-V`/`--version`. Only the help text is drawn here, from clap's own
-//! definitions: the playbook copies the palette of Python 3.14's argparse,
-//! which colors short and long options differently, and clap styles them alike.
+//! clap parses commands and game options, including `-h`, `--help`,
+//! `help [<command>]` and `-V`/`--version`. The global `--no-color` flag is
+//! read first so it works anywhere, even alongside help. The help is drawn
+//! from clap's definitions: the playbook copies Python 3.14 argparse's
+//! palette, which colors short and long options differently.
 
 use std::env;
 use std::ffi::OsString;
@@ -80,7 +81,12 @@ struct Arguments {
     #[arg(long, value_name = "NUMBER")]
     seed: Option<u64>,
     /// Opt in to the global leaderboard as this username
-    #[arg(long, value_name = "NAME", conflicts_with = "reset_score")]
+    #[arg(
+        long,
+        value_name = "NAME",
+        conflicts_with = "reset_score",
+        value_parser = crate::online::parse_username
+    )]
     online: Option<String>,
     /// Reset the saved offline high score before starting
     #[arg(long, overrides_with = "reset_score")]
@@ -144,8 +150,19 @@ where
     I: IntoIterator<Item = S>,
     S: Into<OsString>,
 {
+    let args: Vec<OsString> = args.into_iter().map(Into::into).collect();
+    let no_color = no_color_requested(&args);
+    // Like playbook, take this global presentation flag out before parsing:
+    // clap conflicts a root flag with subcommands, and its built-in `help`
+    // treats everything after it as a command name. Preserve data after `--`.
+    let mut options = true;
     let arguments =
-        std::iter::once(OsString::from("dbird")).chain(args.into_iter().map(Into::into));
+        std::iter::once(OsString::from("dbird")).chain(args.into_iter().filter(|argument| {
+            if argument == "--" {
+                options = false;
+            }
+            !(options && argument == "--no-color")
+        }));
     let mut matches = command().try_get_matches_from(arguments)?;
     let arguments = Arguments::from_arg_matches_mut(&mut matches)?;
     Ok(match arguments.command {
@@ -153,7 +170,7 @@ where
         Some(Subcommands::Version) => CliCommand::Version,
         None => CliCommand::Run(CliOptions {
             ascii: arguments.ascii,
-            no_color: arguments.no_color,
+            no_color: arguments.no_color || no_color,
             mute: arguments.mute,
             seed: arguments.seed,
             online_username: arguments.online,
@@ -177,10 +194,15 @@ pub fn no_color_variable() -> bool {
 /// Colors only reach a terminal, and `--no-color`, `NO_COLOR` or `TERM=dumb`
 /// turn them off.
 pub fn colors_allowed(terminal: bool, no_color: bool) -> bool {
-    terminal
+    let allowed = terminal
         && !no_color
         && !no_color_variable()
-        && env::var_os("TERM").is_none_or(|term| term != "dumb")
+        && env::var_os("TERM").is_none_or(|term| term != "dumb");
+    // Our custom help writes ANSI directly, so enable Windows console support
+    // before writing it, just as crossterm does for the game.
+    #[cfg(windows)]
+    let allowed = allowed && crossterm::ansi_support::supports_ansi();
+    allowed
 }
 
 /// Prints what clap stopped at: help or the version to stdout with exit 0, or
@@ -436,6 +458,13 @@ mod tests {
             parse_args(["update", "--no-color"]).unwrap(),
             CliCommand::Update
         );
+        for name in ["update", "upgrade", "version"] {
+            assert_eq!(
+                parse_args(["--no-color", name]).unwrap(),
+                parse_args([name, "--no-color"]).unwrap(),
+                "{name} accepts the global flag on either side"
+            );
+        }
     }
 
     #[test]
@@ -443,7 +472,13 @@ mod tests {
         let (expected, code) = shown(&["--help"]);
         assert_eq!(code, 0);
         assert_eq!(expected, help().to_string());
-        for arguments in [&["-h"][..], &["help"], &["--no-color", "-h"]] {
+        for arguments in [
+            &["-h"][..],
+            &["help"],
+            &["--no-color", "-h"],
+            &["--no-color", "help"],
+            &["help", "--no-color"],
+        ] {
             assert_eq!(shown(arguments), (expected.clone(), 0), "{arguments:?}");
         }
     }
@@ -454,7 +489,16 @@ mod tests {
         assert_eq!(code, 0);
         assert!(expected.starts_with("Update dbird to the latest release\n\nUsage: dbird update"));
         assert_eq!(shown(&["help", "update"]), (expected.clone(), 0));
-        assert_eq!(shown(&["update", "-h"]), (expected, 0));
+        for arguments in [
+            &["update", "-h"][..],
+            &["--no-color", "update", "-h"],
+            &["update", "--no-color", "-h"],
+            &["help", "update", "--no-color"],
+            &["help", "--no-color", "update"],
+            &["--no-color", "help", "update"],
+        ] {
+            assert_eq!(shown(arguments), (expected.clone(), 0), "{arguments:?}");
+        }
     }
 
     #[test]
@@ -524,11 +568,19 @@ mod tests {
             &["--seed", "18446744073709551616"],
             &["--seed", "1", "--seed", "2"],
             &["--online"],
+            &["--online="],
+            &["--online", "ab"],
+            &["--online", "bird name"],
+            &["--online", "_bird"],
+            &["--online", "bïrd"],
+            &["--online", "way-too-long-for-dbird"],
             &["--online", "one", "--online", "two"],
             &["--reset-score", "--online", "PlayerOne"],
             &["--seed", "1", "update"],
             &["update", "--mute"],
             &["help", "fly-now"],
+            &["--", "--no-color"],
+            &["--no-color=true"],
         ] {
             let error = stop(arguments);
             assert_eq!(error.exit_code(), 2, "{arguments:?}: {error}");

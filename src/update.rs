@@ -205,11 +205,23 @@ fn update() -> Result<(), String> {
         "Updating dbird {current} to {latest} with {}.",
         plan.manager
     );
+    run_plan(&plan, &latest)
+}
+
+fn update_command(plan: &Plan, version: &str) -> Command {
     let mut command = Command::new(&plan.program);
     command.args(&plan.args);
     if let Some(folder) = &plan.install_dir {
-        command.env("DBIRD_INSTALL_DIR", without_verbatim_prefix(folder));
+        command
+            .env("DBIRD_INSTALL_DIR", without_verbatim_prefix(folder))
+            // An old installation pin must not undo the version check above.
+            .env("DBIRD_VERSION", version);
     }
+    command
+}
+
+fn run_plan(plan: &Plan, version: &str) -> Result<(), String> {
+    let mut command = update_command(plan, version);
     if plan.detach {
         command
             .spawn()
@@ -303,6 +315,41 @@ pub fn resolve(executable: &Path) -> io::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    struct TestDirectory(PathBuf);
+
+    #[cfg(unix)]
+    impl TestDirectory {
+        fn new() -> Self {
+            use std::sync::atomic::{AtomicU64, Ordering};
+
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let path = env::temp_dir().join(format!(
+                "dbird-update-process-test-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+
+        fn script(&self, name: &str, body: &str) -> PathBuf {
+            use std::os::unix::fs::PermissionsExt;
+
+            let path = self.0.join(name);
+            fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
 
     #[test]
     fn homebrew_keeps_dbird_in_its_cellar() {
@@ -429,6 +476,66 @@ mod tests {
         assert_eq!(windows.program, "powershell");
         assert!(windows.args.last().unwrap().contains(INSTALLER_PS1));
         assert!(windows.detach);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_installer_receives_the_checked_version_and_destination() {
+        let directory = TestDirectory::new();
+        let destination = directory.0.join("installed game");
+        fs::create_dir(&destination).unwrap();
+        directory.script(
+            "curl",
+            r#"printf '%s\n' 'printf "%s\n" "$DBIRD_VERSION" > "$DBIRD_INSTALL_DIR/requested-version"'"#,
+        );
+        let plan = plan(&Channel::Installer(destination.clone()), false).unwrap();
+        let output = update_command(&plan, "1.4.0")
+            .env(
+                "PATH",
+                env::join_paths([&directory.0, Path::new("/usr/bin"), Path::new("/bin")]).unwrap(),
+            )
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            fs::read_to_string(destination.join("requested-version")).unwrap(),
+            "1.4.0\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_download_cannot_execute_a_partial_installer() {
+        let directory = TestDirectory::new();
+        directory.script(
+            "curl",
+            r#"printf '%s\n' 'touch "$DBIRD_INSTALL_DIR/partial-installer-ran"'
+exit 22"#,
+        );
+        let plan = plan(&Channel::Installer(directory.0.clone()), false).unwrap();
+        let output = update_command(&plan, "1.4.0")
+            .env(
+                "PATH",
+                env::join_paths([&directory.0, Path::new("/usr/bin"), Path::new("/bin")]).unwrap(),
+            )
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(22));
+        assert!(!directory.0.join("partial-installer-ran").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_package_manager_failure_is_reported() {
+        let directory = TestDirectory::new();
+        let manager = directory.script("manager", "exit 9");
+        let mut plan = plan(&Channel::Homebrew, false).unwrap();
+        plan.program = manager.to_str().unwrap().to_owned();
+        let error = run_plan(&plan, "1.4.0").unwrap_err();
+        assert!(
+            error.contains("Homebrew didn't finish the update"),
+            "{error}"
+        );
     }
 
     #[test]
