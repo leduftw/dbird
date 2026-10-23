@@ -49,20 +49,20 @@ irm https://github.com/leduftw/dbird/releases/latest/download/dbird-installer.ps
 
 Set `DBIRD_VERSION` to install a specific version or `DBIRD_INSTALL_DIR` to choose the destination. If the destination isn't on `PATH`, the installer prints the line to add.
 
-### Update
-
-```sh
-dbird update                        # or: dbird upgrade
-```
-
-`dbird update` checks for a newer release and installs it the same way dbird was installed: `brew upgrade leduftw/tap/dbird` for Homebrew, `winget upgrade --id leduftw.dbird` for WinGet, `cargo install dbird --locked` for crates.io, and the one-line installer again, into the same folder, for everything else. A new version reaches WinGet only after Microsoft's review, so until it does, `dbird update` says the release isn't on WinGet yet. A build from source isn't updated this way; pull and rebuild it instead.
-
 Or install the latest development version directly from GitHub:
 
 ```sh
 cargo install --locked --git https://github.com/leduftw/dbird.git
 dbird
 ```
+
+### Update
+
+```sh
+dbird update                        # or: dbird upgrade
+```
+
+`dbird update` checks for a newer release and installs it the same way dbird was installed: `brew upgrade leduftw/tap/dbird` for Homebrew, `winget upgrade --id leduftw.dbird` for WinGet, `cargo install dbird --locked` for Cargo, and the one-line installer again, into the same folder, for everything else. A new version reaches WinGet only after Microsoft's review, so until it does, `dbird update` says the release isn't on WinGet yet. A binary built with `cargo build` isn't updated this way; pull and rebuild it instead.
 
 ## Play
 
