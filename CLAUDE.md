@@ -70,7 +70,7 @@ A command-line tool here follows the [Command Line Interface Guidelines](https:/
 - Started with no arguments at all, the tool does its default job. If something that job needs isn't set up yet (a token, a terminal), it prints the help plus one line saying what's missing, and exits 0. An explicit command still fails when its requirements are missing; an existing config that can't be read is an error either way.
 - Help uses the colors of Python 3.14's `argparse`, only in a terminal, and none with `NO_COLOR`, `TERM=dumb` or `--no-color`.
 - Arguments are parsed by the language's standard parser (`argparse`, `clap`, `System.CommandLine`), never by hand.
-- `update` (alias `upgrade`) moves to the latest release through whatever installed the tool: `brew upgrade`, `winget upgrade`, `cargo install`, or the release's own installer.
+- `update` (alias `upgrade`) moves to the latest release through whatever installed the tool: `brew upgrade`, `winget upgrade`, `cargo install`, `dotnet tool update`, or the release's own installer.
 - Every release PR checks these rules against the real binaries on all six platforms, so a release that breaks them doesn't ship.
 
 ### Releasing
