@@ -1,6 +1,6 @@
 [package]
 name = "dbird"
-version = "1.4.1"
+version = "1.4.2"
 edition = "2024"
 rust-version = "1.88"
 description = "A fully playable terminal recreation of the classic Flappy Bird game"
