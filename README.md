@@ -1,8 +1,11 @@
 # dbird
 
+[![CI](https://github.com/leduftw/dbird/actions/workflows/playbook.yml/badge.svg)](https://github.com/leduftw/dbird/actions/workflows/playbook.yml)
+[![Latest release](https://img.shields.io/github/v/release/leduftw/dbird)](https://github.com/leduftw/dbird/releases/latest)
+
 A fully playable terminal recreation of the classic Flappy Bird game.
 
-## Quick start
+## Install
 
 ### Requirements
 
@@ -25,7 +28,7 @@ cd dbird
 cargo run --release
 ```
 
-### Install
+### Package managers and installers
 
 Install with a package manager:
 
@@ -64,7 +67,7 @@ dbird update                        # or: dbird upgrade
 
 `dbird update` checks for a newer release and installs it the same way dbird was installed: `brew upgrade leduftw/tap/dbird` for Homebrew, `winget upgrade --id leduftw.dbird` for WinGet, `cargo install dbird --locked` for Cargo, and the one-line installer again, into the same folder, for everything else. A new version reaches WinGet only after Microsoft's review, so until it does, `dbird update` says the release isn't on WinGet yet. A binary built with `cargo build` isn't updated this way; pull and rebuild it instead.
 
-## Play
+## Usage
 
 ### Controls
 
@@ -142,7 +145,7 @@ High scores are stored outside the repository. On macOS the default is:
 
 `$XDG_STATE_HOME` takes precedence when it is set. A missing or malformed score file never prevents the game from starting.
 
-## Develop
+## Development
 
 After cloning the repository, run the complete local check suite with:
 
