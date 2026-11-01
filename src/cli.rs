@@ -17,9 +17,10 @@ use clap::builder::styling::{AnsiColor, Style, Styles};
 use clap::error::ErrorKind;
 use clap::{Arg, Command, CommandFactory, FromArgMatches, Parser, Subcommand};
 
-/// The repo's GitHub description: dbird's help and its repo describe it alike.
+/// The repo's GitHub description as a sentence: dbird's help and its repo
+/// describe it in the same words.
 pub const DESCRIPTION: &str =
-    "a fully playable terminal recreation of the classic Flappy Bird game";
+    "A fully playable terminal recreation of the classic Flappy Bird game.";
 
 /// The game's controls, listed after the options in dbird's help.
 const CONTROLS: [(&str, &str); 6] = [
