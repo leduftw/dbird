@@ -19,6 +19,9 @@ const INSTALLER_PS1: &str =
 /// Where a version's WinGet manifest appears once Microsoft has accepted it.
 const WINGET_MANIFESTS: &str =
     "https://raw.githubusercontent.com/microsoft/winget-pkgs/master/manifests/l/leduftw/dbird";
+/// The folder WinGet keeps dbird in, for one user, for the whole machine or
+/// under a root set in its settings. Those roots can be anywhere.
+const WINGET_FOLDER: &str = "leduftw.dbird_Microsoft.Winget.Source_8wekyb3d8bbwe";
 const USER_AGENT: &str = concat!("dbird/", env!("CARGO_PKG_VERSION"));
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -42,7 +45,10 @@ impl Channel {
         let folder = executable.parent().unwrap_or(Path::new(""));
         if path.contains("/Cellar/dbird/") {
             Self::Homebrew
-        } else if path.to_ascii_lowercase().contains("/microsoft/winget/") {
+        } else if path
+            .split('/')
+            .any(|part| part.eq_ignore_ascii_case(WINGET_FOLDER))
+        {
             Self::WinGet
         } else if cargo_bin == Some(folder) {
             Self::Cargo
@@ -367,11 +373,54 @@ mod tests {
     }
 
     #[test]
-    fn winget_keeps_dbird_in_its_packages_folder() {
-        let path = r"C:\Users\me\AppData\Local\Microsoft\WinGet\Packages\leduftw.dbird_Microsoft.Winget.Source_8wekyb3d8bbwe\dbird.exe";
-        assert_eq!(Channel::of(Path::new(path), None), Channel::WinGet);
-        let verbatim = r"\\?\C:\Users\me\AppData\Local\Microsoft\WinGet\Links\dbird.exe";
-        assert_eq!(Channel::of(Path::new(verbatim), None), Channel::WinGet);
+    fn winget_keeps_dbird_in_a_folder_of_its_own() {
+        for root in [
+            r"C:\Users\me\AppData\Local\Microsoft\WinGet\Packages",
+            r"C:\Program Files\WinGet\Packages",
+            r"C:\Program Files (x86)\WinGet\Packages",
+            r"D:\portable",
+            r"\\?\C:\Program Files\WinGet\Packages",
+        ] {
+            let path = format!(r"{root}\{WINGET_FOLDER}\dbird.exe");
+            assert_eq!(
+                Channel::of(Path::new(&path), None),
+                Channel::WinGet,
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_that_folder_means_winget() {
+        for path in [
+            // winget install --location puts dbird straight into the folder.
+            r"D:\tools\dbird.exe",
+            r"C:\Users\me\AppData\Local\Microsoft\WinGet\Packages\another.package\dbird.exe",
+            r"C:\Program Files\WinGet\Packages\leduftw.dbird_Microsoft.Winget.Source_8wekyb3d8bbwe.old\dbird.exe",
+        ] {
+            assert!(
+                matches!(Channel::of(Path::new(path), None), Channel::Installer(_)),
+                "{path}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wingets_links_lead_to_its_folder() {
+        let root = env::temp_dir().join(format!("dbird-winget-test-{}", std::process::id()));
+        let package = root.join("Packages").join(WINGET_FOLDER);
+        let links = root.join("Links");
+        fs::create_dir_all(&package).unwrap();
+        fs::create_dir_all(&links).unwrap();
+        fs::write(package.join("dbird"), b"").unwrap();
+        let link = links.join("dbird");
+        std::os::unix::fs::symlink(package.join("dbird"), &link).unwrap();
+
+        let resolved = Channel::of(&resolve(&link).unwrap(), None);
+        fs::remove_dir_all(&root).unwrap();
+
+        assert_eq!(resolved, Channel::WinGet);
     }
 
     #[test]
